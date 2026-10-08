@@ -1,5 +1,22 @@
 [project]
 name = "interlock"
 version = "0.0.1"
-requires-python = ">=3.10"
-dependencies = []
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=2.4.6",
+    "pillow>=12.3.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "interlock"
+module-root = ""
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.4.0",
+    "pytest>=9.1.1",
+]

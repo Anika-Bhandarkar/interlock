@@ -9,12 +9,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image
 
-from interlock.data_collection import cutting
 from interlock.data_collection.cutting import (
     COLS,
     ROWS,
+    cut,
     get_corners,
-    place_edge,
+    get_edges,
     sample_curve,
     tab_control_points,
 )
@@ -74,42 +74,6 @@ def plot_pieces(pieces, masks, positions, ax=None, gap_fraction=0.15):
     ax.axis("off")
 
 
-def fallback_edges(corners, rng):
-    """Build edges from the existing helpers. DELETE once cutting.get_edges is implemented."""
-    def make_edge(start, end, is_border):
-        sign = 0 if is_border else rng.choice([-1, 1])
-        return place_edge(sample_curve(tab_control_points(rng)), start, end, sign)
-
-    horizontal_edges = np.array([
-        [make_edge(corners[row, col], corners[row, col + 1], row in (0, ROWS)) for col in range(COLS)]
-        for row in range(ROWS + 1)
-    ])
-    vertical_edges = np.array([
-        [make_edge(corners[row, col], corners[row + 1, col], col in (0, COLS)) for col in range(COLS + 1)]
-        for row in range(ROWS)
-    ])
-    return horizontal_edges, vertical_edges
-
-
-def build_edges(image, seed):
-    """Edges from cutting.get_edges if it's implemented, otherwise from fallback_edges."""
-    corners = get_corners(*image.shape[:2])
-    edges = cutting.get_edges(corners, np.random.default_rng(seed)) if hasattr(cutting, "get_edges") else None
-    if isinstance(edges, tuple) and len(edges) == 2:
-        return tuple(np.asarray(part) for part in edges)
-    print("cutting.get_edges not implemented yet; using fallback_edges.")
-    return fallback_edges(corners, np.random.default_rng(seed))
-
-
-def try_cut(image, seed):
-    """(pieces, masks, positions) as arrays, or None if cut isn't implemented yet."""
-    result = cutting.cut(image, seed)
-    if isinstance(result, tuple) and len(result) == 3 and len(result[0]) > 0:
-        return tuple(np.asarray(part) for part in result)
-    print("cutting.cut not implemented yet; skipping pieces plot.")
-    return None
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--image", help="image to cut (default: synthetic gradient)")
@@ -118,15 +82,14 @@ def main():
     args = parser.parse_args()
 
     image = load_image(args.image)
-    horizontal_edges, vertical_edges = build_edges(image, args.seed)
-    cut_result = try_cut(image, args.seed)
+    # get_edges is the first thing cut draws from its rng, so with the same seed these edges match the pieces
+    horizontal_edges, vertical_edges = get_edges(get_corners(*image.shape[:2]), np.random.default_rng(args.seed))
+    pieces, masks, positions = cut(image, args.seed)
 
-    num_panels = 3 if cut_result else 2
-    fig, axes = plt.subplots(1, num_panels, figsize=(6 * num_panels, 6), layout="constrained")
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6), layout="constrained")
     plot_tab_gallery(50, args.seed, ax=axes[0])
     plot_edges(image, horizontal_edges, vertical_edges, ax=axes[1])
-    if cut_result:
-        plot_pieces(*cut_result, ax=axes[2])
+    plot_pieces(pieces, masks, positions, ax=axes[2])
 
     if args.out:
         fig.savefig(args.out, dpi=150)

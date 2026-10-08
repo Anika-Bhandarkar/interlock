@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from interlock.data_collection.cutting import COLS, ROWS
+from interlock.data_collection.cutting import COLS, ROWS, get_corners, get_edges
 
 # scripts/ isn't a package, so load visualize.py straight from its file path
 VISUALIZE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "visualize.py"
@@ -35,9 +35,9 @@ def test_tab_gallery_draws_one_line_per_tab():
 
 
 def test_plot_edges_draws_every_edge():
-    """Uses build_edges so it works whether or not cutting.get_edges is implemented."""
     image = np.zeros((4 * ROWS, 4 * COLS, 3), dtype=np.uint8)
-    horizontal_edges, vertical_edges = visualize.build_edges(image, seed=0)
+    corners = get_corners(*image.shape[:2])
+    horizontal_edges, vertical_edges = get_edges(corners, np.random.default_rng(0))
     _, ax = plt.subplots()
     visualize.plot_edges(image, horizontal_edges, vertical_edges, ax=ax)
     assert len(ax.lines) == (ROWS + 1) * COLS + ROWS * (COLS + 1)

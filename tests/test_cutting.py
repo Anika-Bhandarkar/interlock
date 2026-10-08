@@ -1,17 +1,19 @@
 """Tests for the jigsaw cutting helpers in interlock/data_collection/cutting.py.
 
 Checks: corner grid layout, tab control point geometry, curve sampling, edge placement, and
-(once implemented) that get_edges/cut partition the image exactly so reassembly reproduces it.
+that get_edges/cut partition the image exactly so reassembly reproduces it.
 """
 
 import numpy as np
 import pytest
 
-from interlock.data_collection import cutting
 from interlock.data_collection.cutting import (
     COLS,
+    PAD,
     ROWS,
+    cut,
     get_corners,
+    get_edges,
     place_edge,
     sample_curve,
     tab_control_points,
@@ -170,19 +172,15 @@ def test_place_edge_rejects_bad_sign(curve):
         place_edge(curve, HORIZONTAL_START, HORIZONTAL_END, 2)
 
 
-# ------------------------------------------------- get_edges (not yet implemented)
+# ------------------------------------------------------------------- get_edges
 
 IMAGE_HEIGHT, IMAGE_WIDTH = 200, 400  # non-square to catch row/col swaps
 
 
 def make_edges(seed):
-    """Corners and edges for the test image; skips the test if get_edges isn't implemented yet."""
+    """Corners and edges for the test image."""
     corners = get_corners(IMAGE_HEIGHT, IMAGE_WIDTH)
-    get_edges = getattr(cutting, "get_edges", None)
-    result = get_edges(corners, np.random.default_rng(seed)) if get_edges else None
-    if not (isinstance(result, tuple) and len(result) == 2):
-        pytest.skip("cutting.get_edges not implemented yet (expected horizontal, vertical edges)")
-    horizontal_edges, vertical_edges = (np.asarray(edges) for edges in result)
+    horizontal_edges, vertical_edges = get_edges(corners, np.random.default_rng(seed))
     return corners, horizontal_edges, vertical_edges
 
 
@@ -221,7 +219,7 @@ def test_edges_reproducible():
         np.testing.assert_array_equal(first_edges, second_edges)
 
 
-# ------------------------------------------------------- cut (not yet implemented)
+# ------------------------------------------------------------------------- cut
 
 CUT_SEED = 0
 
@@ -232,25 +230,15 @@ def noise_image():
     return np.random.default_rng(123).integers(0, 256, size=(400, 400, 3), dtype=np.uint8)
 
 
-def run_cut(image, seed):
-    """Call cut and skip the test if it doesn't return (pieces, masks, positions) yet."""
-    result = cutting.cut(image, seed)
-    if not (isinstance(result, tuple) and len(result) == 3 and len(result[0]) > 0):
-        pytest.skip("cutting.cut not implemented yet (expected pieces, masks, positions)")
-    return tuple(np.asarray(part) for part in result)
-
-
 @pytest.fixture(scope="module")
 def cut_result(noise_image):
-    return run_cut(noise_image, CUT_SEED)
+    return cut(noise_image, CUT_SEED)
 
 
 def piece_layout(image, pieces):
-    """Cell size and padding implied by the image and piece box size."""
+    """Cell size and padding for the image."""
     cell_height, cell_width = image.shape[0] // ROWS, image.shape[1] // COLS
-    box_height = pieces.shape[1]
-    pad = getattr(cutting, "PAD", (box_height - cell_height) // 2)
-    return cell_height, cell_width, pad
+    return cell_height, cell_width, PAD
 
 
 def test_cut_shapes(noise_image, cut_result):
@@ -304,6 +292,6 @@ def test_cut_reassembly_reproduces_image(noise_image, cut_result):
 
 
 def test_cut_reproducible(noise_image, cut_result):
-    repeat = run_cut(noise_image, CUT_SEED)
+    repeat = cut(noise_image, CUT_SEED)
     for first_part, second_part in zip(cut_result, repeat):
         np.testing.assert_array_equal(first_part, second_part)

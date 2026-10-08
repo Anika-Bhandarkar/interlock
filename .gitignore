@@ -1,0 +1,16 @@
+# Datasets
+data/*
+!data/*/
+data/*/*
+!data/*/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+.ipynb_checkpoints/
+
+# Training outputs
+**/checkpoints/
+**/runs/

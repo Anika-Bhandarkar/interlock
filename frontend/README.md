@@ -1,0 +1,1 @@
+Will develop a UI that repeatedly runs inference and displays the puzzle being built live. 

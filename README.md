@@ -33,3 +33,5 @@ INTERLOCK_DATA_DIR=/path/to/data uv run python scripts/preprocess.py
 ```
 
 scripts/visualize.py shows what happens when interlock/data_collection/cutting.py runs. Run with `uv run python scripts/visualize.py --image path/to/photo.jpg`
+
+Onboarding notebook is located at `notebooks/00_intro_adjacency.ipynb`.

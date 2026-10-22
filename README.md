@@ -67,3 +67,47 @@ How it works:
   `PairDataset` (training pairs: true neighbors vs. wrong pieces from the same puzzle whose shape fits,
   re-cut with new tab shapes every epoch).
 - `interlock/models/edge_comparator.py`: the model, `score_matrix`, `evaluate`, save/load.
+## Solver stages 2-4
+`interlock/solver/updaters.py` follows the team plan ("Interlock Approach Deepdive: CNNs + Greedy
+Algorithms"). A *space* is a slot on the board, its *distribution* is a probability over pieces, and its
+*max-piece* is the most likely piece.
+- **Stage 2, `first_updater`:** pencil in a guess for every space, like sudoku. Start at the top-left
+  corner; a priority queue of empty spaces next to filled ones is ordered by the confidence of each space's
+  max-piece. Each space is scored against its neighbors' max-pieces. Pieces aren't taken out, so a piece
+  can be the max-piece of several spaces.
+- **Stage 3, `multistage_updater`:** each round re-scores every space against the max-pieces of all 4
+  neighbors, then applies the plan's thresholds: (1) a piece that is the max-piece of exactly one space for
+  2 rounds is locked there and removed from other spaces; (2) once no max-piece has moved for 2 rounds,
+  stop; (3) a space whose max-piece has probability > 0.6 is locked.
+- **Stage 4, `final_assignment`:** the Hungarian algorithm (`scipy.optimize.linear_sum_assignment`) fills
+  the unlocked spaces so that no piece is used twice.
+
+A space's distribution comes from its neighbors' edge scores: by default the comparator's raw scores
+(logits) are averaged over the neighbors, then softmaxed over candidates (`--combine mean`).
+`--combine product` multiplies the neighbors' match probabilities instead. Corner and edge pieces only go
+in border spaces with matching flat sides.
+
+```bash
+uv run python scripts/solve.py                  # accuracy on the first 30 val puzzles, per stage
+uv run python scripts/solve.py --noise 8        # same, with noise added to the comparator's scores
+uv run python scripts/animate_solve.py --index 3 --out solve.gif     # animated solve (or no --out: window)
+uv run python scripts/visualize_solve.py --index 5 --noise 10 --out solve.png   # static summary figure
+```
+With the trained comparator all 30 val puzzles are solved perfectly, in about 3 ms per puzzle after the
+~0.7 s `score_matrix` call. Adding noise to the scores shows how the solver copes with a weaker comparator
+(30 val puzzles, final result):
+
+| `--noise` | placed right | puzzles solved | locked but wrong |
+|---|---|---|---|
+| 6 | 99.7% | 97% | 0.3% |
+| 8 | 83.1% | 60% | 16.9% |
+| 10 | 57.8% | 10% | 42.2% |
+
+Stage 3 locks pieces its distribution is sure about, so it relies on the comparator's scores being
+calibrated: when they are confidently wrong (high `--noise`), it locks wrong pieces too. Raising threshold
+3 or turning it off changed accuracy by under 1.5 points in these tests. If a future comparator is less
+accurate, temperature-scale its logits on val data before solving.
+
+`animate_solve.py` shows the shuffled pieces on the left and the board on the right: each space shows its
+max-piece under a grey overlay once it has a distribution, and turns full color once set (locked by a
+threshold, or placed by stage 4), when the piece also fades out of the pile.

@@ -148,10 +148,10 @@ def processed_dir(tmp_path_factory):
     rows = []
     for split, count in [("train", 3), ("val", 2)]:
         for index in range(count):
-            path = f"{split}/n000/{index}.png"
+            path = f"{split}/sa_{index}.png"
             (root / path).parent.mkdir(parents=True, exist_ok=True)
             Image.fromarray(rng.integers(0, 256, size=(400, 400, 3), dtype=np.uint8)).save(root / path)
-            rows.append({"path": path, "split": split, "class_id": "n000", "orig_width": 400, "orig_height": 400})
+            rows.append({"path": path, "split": split, "source": "sa_000000", "orig_width": 400, "orig_height": 400})
     with open(root / "manifest.csv", "w", newline="") as manifest_file:
         writer = csv.DictWriter(manifest_file, fieldnames=list(rows[0]))
         writer.writeheader()

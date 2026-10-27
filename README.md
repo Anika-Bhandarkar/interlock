@@ -15,9 +15,9 @@ This creates `.venv/` with the right Python and all dependencies. Run things wit
 Add a dependency with `uv add <package>` (or `uv add --dev <package>` for dev-only tools) and commit both `pyproject.toml` and `uv.lock`.
 
 ## Data
-Images come from [Imagenette](https://github.com/fastai/imagenette), a free 10-class subset of ImageNet (no account needed). Everything under `data/` is gitignored.
+Images come from [SA-1B](https://ai.meta.com/datasets/segment-anything-downloads/), Meta's dataset of high-resolution images. Everything under `data/` is gitignored.
 
-1. Download (~1.45 GB) into `data/raw/imagenette2/`. Safe to re-run; it skips steps that are already done.
+1. Download (~1.45 GB) into `data/raw/sa1b/`. Safe to re-run; it skips steps that are already done. ** download.py expects the file `data/raw/sa1b_links.txt` to exist and to contain links to .tar files to download. Links file should be downloaded from the SA-1B page linked above before running.
    ```bash
    uv run python scripts/download.py
    ```

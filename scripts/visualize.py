@@ -13,10 +13,9 @@ from interlock.data_collection.cutting import (
     COLS,
     ROWS,
     cut,
-    get_corners,
-    get_edges,
+    puzzle_edges,
     sample_curve,
-    tab_control_points,
+    tab_shapes,
 )
 
 DEFAULT_SIZE = 400
@@ -36,15 +35,19 @@ def load_image(path):
     return np.asarray(image)
 
 
-def plot_tab_gallery(num_tabs, seed, ax=None):
-    """Overlay num_tabs random tabs on the standard edge (0, 0) -> (1, 0)."""
+def plot_tab_shapes(seed, ax=None):
+    """Overlay the puzzle's set of tab shapes on the standard edge (0, 0) -> (1, 0), regular to funky.
+
+    tab_shapes is the first thing cut draws from its rng, so these are the shapes cut(image, seed) uses.
+    """
     ax = ax or plt.gca()
-    rng = np.random.default_rng(seed)
-    for _ in range(num_tabs):
-        curve_points = sample_curve(tab_control_points(rng))
-        ax.plot(curve_points[:, 0], curve_points[:, 1], linewidth=0.8, alpha=0.6)
+    shapes = tab_shapes(np.random.default_rng(seed))
+    for index, shape in enumerate(shapes):
+        curve_points = sample_curve(shape)
+        ax.plot(curve_points[:, 0], curve_points[:, 1], linewidth=1, label=f"shape {index}")
     ax.set_aspect("equal")
-    ax.set_title(f"{num_tabs} random tabs (seed {seed})")
+    ax.legend(fontsize=7, loc="lower center", ncol=3)
+    ax.set_title(f"{len(shapes)} tab shapes (seed {seed}), regular to funky")
 
 
 def plot_edges(image, horizontal_edges, vertical_edges, ax=None):
@@ -82,12 +85,12 @@ def main():
     args = parser.parse_args()
 
     image = load_image(args.image)
-    # get_edges is the first thing cut draws from its rng, so with the same seed these edges match the pieces
-    horizontal_edges, vertical_edges = get_edges(get_corners(*image.shape[:2]), np.random.default_rng(args.seed))
+    # cut draws its edges with puzzle_edges, so with the same seed these edges match the pieces
+    horizontal_edges, vertical_edges = puzzle_edges(*image.shape[:2], np.random.default_rng(args.seed))
     pieces, masks, positions = cut(image, args.seed)
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 6), layout="constrained")
-    plot_tab_gallery(50, args.seed, ax=axes[0])
+    plot_tab_shapes(args.seed, ax=axes[0])
     plot_edges(image, horizontal_edges, vertical_edges, ax=axes[1])
     plot_pieces(pieces, masks, positions, ax=axes[2])
 

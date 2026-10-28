@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from interlock.data_collection.cutting import COLS, ROWS, get_corners, get_edges
+from interlock.data_collection.cutting import COLS, NUM_TAB_SHAPES, ROWS, get_corners, get_edges
 
 # scripts/ isn't a package, so load visualize.py straight from its file path
 VISUALIZE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "visualize.py"
@@ -28,10 +28,10 @@ def close_figures():
     plt.close("all")
 
 
-def test_tab_gallery_draws_one_line_per_tab():
+def test_tab_shapes_draws_one_line_per_shape():
     _, ax = plt.subplots()
-    visualize.plot_tab_gallery(7, seed=0, ax=ax)
-    assert len(ax.lines) == 7
+    visualize.plot_tab_shapes(seed=0, ax=ax)
+    assert len(ax.lines) == NUM_TAB_SHAPES
 
 
 def test_plot_edges_draws_every_edge():

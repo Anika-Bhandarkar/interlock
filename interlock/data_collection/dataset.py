@@ -17,12 +17,15 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 from interlock.data_collection.cutting import cut
+from interlock.data_collection.grid import random_grid
 from interlock.data_collection.pairs import (
     DIRECTIONS,
     RELATIONS,
+    WINDOW_SHAPE,
     can_fit,
     neighbor_ids,
     orient,
+    pad_to,
     seam_windows,
     side_types,
     to_rgba,
@@ -45,8 +48,12 @@ def load_manifest(split: str, processed_dir: Path = PROCESSED_DIR) -> list[dict]
 class PuzzleDataset(Dataset):
     """Item i is image i of `rows` cut into a puzzle: (pieces, masks, positions) as returned by cut().
 
-    Seed rule (same as the onboarding notebook): puzzle i is cut with seed i + seed_offset, so seed_offset=0
-    always gives the same puzzles. PairDataset changes the offset every epoch to get new tab shapes.
+    Each puzzle gets its own grid from random_grid (cell size and crop), so puzzles differ in piece count and
+    piece size; the grid is positions.max(axis=0) + 1 and the cell is pairs.cell_size(box).
+
+    Seed rule (same as the onboarding notebook): puzzle i uses seed i + seed_offset, for both its grid and its
+    cut, so seed_offset=0 always gives the same puzzles. PairDataset changes the offset every epoch to get new
+    grids and tab shapes.
     """
 
     def __init__(self, rows: list[dict], processed_dir: Path = PROCESSED_DIR, seed_offset: int = 0):
@@ -61,7 +68,10 @@ class PuzzleDataset(Dataset):
         return np.array(Image.open(self.processed_dir / self.rows[index]["path"]).convert("RGB"))
 
     def __getitem__(self, index: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        return cut(self.load_image(index), seed=index + self.seed_offset)
+        seed = index + self.seed_offset
+        # a separate stream from cut's default_rng(seed), so the grid draw isn't correlated with the tab shapes
+        crop, rows, cols = random_grid(self.load_image(index), np.random.default_rng([seed, 1]))
+        return cut(crop, seed, rows, cols)
 
 
 class PairDataset(Dataset):
@@ -77,8 +87,8 @@ class PairDataset(Dataset):
     drawn. DataLoader copies the dataset into its workers when an epoch starts, so don't use
     persistent_workers or they'll keep the old epoch.
 
-    Returns windows (4 * pairs_per_puzzle, 5, B, 2 * SEAM_HALF_WIDTH) uint8 and labels (same length,)
-    float32. Use collate_pairs to batch several puzzles.
+    Returns windows (4 * pairs_per_puzzle, 5, *WINDOW_SHAPE) uint8, padded so every puzzle gives the same
+    shape whatever its cell size, and labels (same length,) float32. Use collate_pairs to batch several puzzles.
     """
 
     def __init__(
@@ -133,7 +143,7 @@ class PairDataset(Dataset):
         labels = torch.from_numpy(np.concatenate(all_labels).astype(np.float32))
         if self.augment:
             windows = random_flips_and_colors(windows, rng)
-        return windows, labels
+        return pad_to(windows, *WINDOW_SHAPE), labels
 
 
 def random_flips_and_colors(windows: torch.Tensor, rng: np.random.Generator) -> torch.Tensor:

@@ -10,12 +10,13 @@ from torch.utils.data import DataLoader
 
 from interlock.data_collection.cutting import COLS, ROWS, cut
 from interlock.data_collection.dataset import PairDataset, PuzzleDataset, collate_pairs, load_manifest
+from interlock.data_collection.grid import random_grid
 from interlock.data_collection.pairs import (
     ABOVE,
     BELOW,
     LEFT,
     RIGHT,
-    SEAM_HALF_WIDTH,
+    WINDOW_SHAPE,
     can_fit,
     neighbor_ids,
     side_types,
@@ -55,7 +56,7 @@ def logits(model, puzzle):
 
 
 def test_forward_accepts_uint8_and_float(model):
-    windows = torch.randint(0, 256, (6, 5, 72, 2 * SEAM_HALF_WIDTH), dtype=torch.uint8)
+    windows = torch.randint(0, 256, (6, 5, *WINDOW_SHAPE), dtype=torch.uint8)
     from_uint8 = model(windows)
     from_float = model(windows.float() / 255)
     assert from_uint8.shape == (6,)
@@ -148,10 +149,10 @@ def processed_dir(tmp_path_factory):
     rows = []
     for split, count in [("train", 3), ("val", 2)]:
         for index in range(count):
-            path = f"{split}/n000/{index}.png"
+            path = f"{split}/sa_{index}.png"
             (root / path).parent.mkdir(parents=True, exist_ok=True)
             Image.fromarray(rng.integers(0, 256, size=(400, 400, 3), dtype=np.uint8)).save(root / path)
-            rows.append({"path": path, "split": split, "class_id": "n000", "orig_width": 400, "orig_height": 400})
+            rows.append({"path": path, "split": split, "source": "sa_000000", "orig_width": 400, "orig_height": 400})
     with open(root / "manifest.csv", "w", newline="") as manifest_file:
         writer = csv.DictWriter(manifest_file, fieldnames=list(rows[0]))
         writer.writeheader()
@@ -167,16 +168,17 @@ def test_load_manifest_filters_split(processed_dir):
 def test_puzzle_dataset_follows_seed_rule(processed_dir):
     puzzles = PuzzleDataset(load_manifest("val", processed_dir), processed_dir)
     pieces, masks, positions = puzzles[1]
-    expected = cut(puzzles.load_image(1), seed=1)
+    crop, rows, cols = random_grid(puzzles.load_image(1), np.random.default_rng([1, 1]))
+    expected = cut(crop, seed=1, rows=rows, cols=cols)
     np.testing.assert_array_equal(masks, expected[1])
-    assert pieces.shape[0] == NUM_PIECES
+    assert pieces.shape[0] == rows * cols
 
 
 def test_pair_dataset_item(processed_dir):
     pairs = PairDataset(load_manifest("train", processed_dir), pairs_per_puzzle=5, augment=False,
                         processed_dir=processed_dir)
     windows, labels = pairs[0]
-    assert windows.shape == (20, 5, 72, 2 * SEAM_HALF_WIDTH) and windows.dtype == torch.uint8
+    assert windows.shape == (20, 5, *WINDOW_SHAPE) and windows.dtype == torch.uint8
     assert labels.tolist() == [1.0] * 5 + [0.0] * 5 + [1.0] * 5 + [0.0] * 5
     # positives interlock: no pixel claimed by both pieces; every negative overlaps or leaves a gap somewhere
     overlap = ((windows[:, 3] > 0) & (windows[:, 4] > 0)).sum(dim=(1, 2))

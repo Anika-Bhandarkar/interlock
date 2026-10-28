@@ -11,10 +11,10 @@ from interlock.data_collection.pairs import (
     FLAT,
     RELATIONS,
     RIGHT,
-    SEAM_HALF_WIDTH,
     TAB,
     can_fit,
     cell_size,
+    seam_half_width,
     neighbor_ids,
     opposite,
     orient,
@@ -77,7 +77,7 @@ def test_can_fit_keeps_true_neighbors_and_drops_self(puzzles):
 def test_seam_windows_shape(puzzles):
     pieces, masks, _ = puzzles[0]
     windows = seam_windows(to_rgba(pieces, masks), [0, 1, 2], [3, 4, 5])
-    assert windows.shape == (3, 5, pieces.shape[1], 2 * SEAM_HALF_WIDTH)
+    assert windows.shape == (3, 5, pieces.shape[1], 2 * seam_half_width(cell_size(pieces.shape[1])))
     assert str(windows.dtype) == "torch.uint8"
 
 
@@ -89,6 +89,7 @@ def test_seam_windows_true_neighbors_rebuild_image(noise_image, puzzles, directi
     for pieces, masks, positions in puzzles[:5]:
         box = pieces.shape[1]
         cell = cell_size(box)
+        half_width = seam_half_width(cell)
         rgba = to_rgba(*orient(pieces, masks, relation))
         neighbors = neighbor_ids(positions, relation)
         left_ids = np.array(list(neighbors))
@@ -106,8 +107,8 @@ def test_seam_windows_true_neighbors_rebuild_image(noise_image, puzzles, directi
             for _ in range(relation):
                 x, y = y, size - 1 - x
             top = y * cell + middle.start - PAD
-            left = x * cell + cell - SEAM_HALF_WIDTH
-            expected = oriented_image[top : top + (middle.stop - middle.start), left : left + 2 * SEAM_HALF_WIDTH]
+            left = x * cell + cell - half_width
+            expected = oriented_image[top : top + (middle.stop - middle.start), left : left + 2 * half_width]
             np.testing.assert_array_equal(window[:3, middle].transpose(1, 2, 0), expected)
 
 

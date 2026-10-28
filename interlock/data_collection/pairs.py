@@ -5,10 +5,13 @@ notebook). RELATIONS is ordered so that rotating a piece counter-clockwise by r 
 to the right, which keeps the bookkeeping below to one rule: side r of A faces side (r + 2) % 4 of B.
 """
 
+import math
+
 import numpy as np
 import torch
+import torch.nn.functional as F
 
-from interlock.data_collection.cutting import PAD
+from interlock.data_collection.cutting import PAD, PIECE_SIZE
 
 RELATIONS = ("right", "below", "left", "above")
 RIGHT, BELOW, LEFT, ABOVE = range(4)
@@ -18,9 +21,12 @@ OFFSETS = {RIGHT: (1, 0), BELOW: (0, 1), LEFT: (-1, 0), ABOVE: (0, -1)}  # (dx, 
 
 # side shapes
 FLAT, TAB, BLANK = 0, 1, -1  # TAB sticks out, BLANK is cut in; two sides fit only if their product is -1
-SIDE_PROBE = 0.15  # fraction of a cell; tabs reach ~0.25 cell and jitter stays under ~0.05, so 0.15 splits them
+SIDE_PROBE = 0.15  # fraction of a cell; tabs reach >= 0.22 and dip back <= 0.08 (cutting.MIN_TAB_HEIGHT, MAX_DIP),
+# each give or take cutting.GRID_JITTER
 
-SEAM_HALF_WIDTH = 24  # window around the seam, in pixels on each side; must cover the tab reach (~12 px)
+SEAM_HALF_WIDTH = 40  # window around the seam, in pixels on each side; must cover the tab reach (~39 px for the largest pieces)
+TAB_REACH = 0.4  # fraction of a cell a tab or blank can reach past (or into) the unjittered cell edge; measured ~0.39
+WINDOW_SHAPE = (PIECE_SIZE, 2 * SEAM_HALF_WIDTH)  # (height, width) every seam window is padded to before the model
 
 
 def opposite(relation: int) -> int:
@@ -30,6 +36,17 @@ def opposite(relation: int) -> int:
 def cell_size(box: int) -> int:
     """Side of a grid cell, from the side of a piece's box (box = cell + 2 * PAD)."""
     return box - 2 * PAD
+
+
+def seam_half_width(cell: int, half_width: int = SEAM_HALF_WIDTH) -> int:
+    """half_width, capped so the window stops short of the far sides of both pieces.
+
+    A's left side and B's right side face other pieces, and a blank there cuts up to TAB_REACH * cell into
+    the piece. A window that reaches that far shows those unrelated shapes, so true pairs get gaps at the
+    window's edges. Small cells are capped (32 -> 28 for a 40 px cell); the cap never drops below the tab
+    reach, so the tab across the seam itself is always in view.
+    """
+    return min(half_width, cell - math.ceil(TAB_REACH * cell))
 
 
 def rotate(array: np.ndarray, relation: int) -> np.ndarray:
@@ -94,6 +111,19 @@ def to_rgba(pieces: np.ndarray, masks: np.ndarray) -> torch.Tensor:
     return torch.from_numpy(np.ascontiguousarray(rgba)).permute(0, 3, 1, 2).contiguous()
 
 
+def pad_to(x: torch.Tensor, height: int, width: int) -> torch.Tensor:
+    """x with its last two dims centered in zeros to (height, width), so every puzzle feeds the model one shape.
+
+    Pieces keep their pixel scale: zeros in the mask channels read as "not part of the piece", like the box margin.
+    When the extra rows or columns are odd, the bottom or right side gets the extra pixel.
+    """
+    extra_rows, extra_cols = height - x.shape[-2], width - x.shape[-1]
+    if extra_rows < 0 or extra_cols < 0:
+        raise ValueError(f"can't pad {tuple(x.shape[-2:])} to ({height}, {width}): already larger")
+    top, left = extra_rows // 2, extra_cols // 2
+    return F.pad(x, (left, extra_cols - left, top, extra_rows - top))
+
+
 def seam_windows(
     rgba: torch.Tensor,
     left_ids: torch.Tensor | np.ndarray,
@@ -104,18 +134,22 @@ def seam_windows(
 
     Works like the notebook's make_pair_images (B's box one cell to the right of A's), then keeps only
     `half_width` columns on each side of the seam, which is where both color and shape evidence lives.
+    For small cells half_width is capped by seam_half_width, so windows can be narrower than
+    2 * half_width; pad_to brings them back to WINDOW_SHAPE for the model.
 
     Args:
         rgba: (N, 4, B, B) uint8 output of to_rgba, already oriented.
         left_ids, right_ids: (n,) piece ids.
     Returns:
-        (n, 5, B, 2 * half_width) uint8: RGB (B drawn over A), A's mask, B's mask (masks 0/255).
+        (n, 5, B, 2 * seam_half_width(cell, half_width)) uint8: RGB (B drawn over A), A's mask, B's mask
+        (masks 0/255).
         Overlap (both masks set) or gaps (neither set) along the seam mean the shapes don't fit.
     """
     box = rgba.shape[-1]
     cell = cell_size(box)
     if not 1 <= half_width <= PAD + cell:
         raise ValueError(f"half_width must be between 1 and {PAD + cell}, got {half_width}")
+    half_width = seam_half_width(cell, half_width)
     low = PAD + cell - half_width  # canvas column where the window starts
     width = 2 * half_width
 

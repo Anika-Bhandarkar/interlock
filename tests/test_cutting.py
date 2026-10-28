@@ -9,6 +9,7 @@ import pytest
 
 from interlock.data_collection.cutting import (
     COLS,
+    NUM_TAB_SHAPES,
     PAD,
     ROWS,
     cut,
@@ -16,10 +17,16 @@ from interlock.data_collection.cutting import (
     get_edges,
     place_edge,
     sample_curve,
-    tab_control_points,
+    tab_shapes,
 )
 
 SEEDS = range(200)
+
+
+def tab_control_points(rng):
+    """A random shape from a random puzzle's set, so tests across seeds cover every funkiness slot."""
+    shapes = tab_shapes(rng)
+    return shapes[rng.integers(NUM_TAB_SHAPES)]
 
 
 def cross_2d(vector_a, vector_b):
@@ -295,3 +302,66 @@ def test_cut_reproducible(noise_image, cut_result):
     repeat = cut(noise_image, CUT_SEED)
     for first_part, second_part in zip(cut_result, repeat):
         np.testing.assert_array_equal(first_part, second_part)
+
+
+# ------------------------------------------------------------- custom grid sizes
+
+# (rows, cols, height, width): non-square grids, non-square cells (40 x 30, 30 x 40), and a single row
+CUSTOM_GRIDS = [(6, 9, 240, 360), (4, 5, 160, 150), (12, 8, 360, 320), (1, 3, 40, 120)]
+
+
+@pytest.mark.parametrize("rows, cols, height, width", CUSTOM_GRIDS)
+def test_corners_custom_grid(rows, cols, height, width):
+    corners = get_corners(height, width, rows, cols)
+    assert corners.shape == (rows + 1, cols + 1, 2)
+    assert np.all(np.diff(corners[..., 0], axis=1) == width // cols)
+    assert np.all(np.diff(corners[..., 1], axis=0) == height // rows)
+    np.testing.assert_array_equal(corners[-1, -1], (width, height))
+
+
+@pytest.mark.parametrize("rows, cols", [(0, 5), (5, 0), (-1, 3)])
+def test_corners_reject_empty_grid(rows, cols):
+    with pytest.raises(ValueError):
+        get_corners(120, 120, rows, cols)
+
+
+def test_corners_reject_size_not_divisible_by_custom_grid():
+    with pytest.raises(ValueError, match="rows 7"):
+        get_corners(240, 360, 7, 9)
+
+
+@pytest.mark.parametrize("rows, cols, height, width", CUSTOM_GRIDS)
+def test_cut_custom_grid_partitions_and_reassembles(rows, cols, height, width):
+    image = np.random.default_rng(7).integers(0, 256, size=(height, width, 3), dtype=np.uint8)
+    pieces, masks, positions = cut(image, CUT_SEED, rows, cols)
+
+    cell_height, cell_width = height // rows, width // cols
+    box_height, box_width = cell_height + 2 * PAD, cell_width + 2 * PAD
+    assert pieces.shape == (rows * cols, box_height, box_width, 3)
+    assert masks.shape == (rows * cols, box_height, box_width)
+    assert sorted(map(tuple, positions.tolist())) == sorted((x, y) for x in range(cols) for y in range(rows))
+
+    coverage = np.zeros((height + 2 * PAD, width + 2 * PAD), dtype=int)
+    canvas = np.zeros((height + 2 * PAD, width + 2 * PAD, 3), dtype=int)
+    for piece, mask, (x, y) in zip(pieces, masks, positions):
+        top, left = y * cell_height, x * cell_width
+        coverage[top : top + box_height, left : left + box_width] += mask
+        canvas[top : top + box_height, left : left + box_width] += piece * mask[..., None]
+    assert np.all(coverage[PAD : PAD + height, PAD : PAD + width] == 1)
+    np.testing.assert_array_equal(canvas[PAD : PAD + height, PAD : PAD + width], image)
+
+
+def test_cut_defaults_to_rows_by_cols(noise_image, cut_result):
+    explicit = cut(noise_image, CUT_SEED, ROWS, COLS)
+    for default_part, explicit_part in zip(cut_result, explicit):
+        np.testing.assert_array_equal(default_part, explicit_part)
+
+
+def test_pad_covers_tabs_at_cell_max():
+    """Tabs on the largest supported cell must stay inside their boxes, or cut() silently clips them."""
+    from interlock.data_collection.cutting import CELL_MAX
+
+    image = np.random.default_rng(0).integers(0, 256, size=(4 * CELL_MAX, 4 * CELL_MAX, 3), dtype=np.uint8)
+    for seed in range(20):
+        _, masks, _ = cut(image, seed, 4, 4)
+        assert masks.sum() == image.shape[0] * image.shape[1], f"seed {seed}: tab pixels fell outside their boxes"

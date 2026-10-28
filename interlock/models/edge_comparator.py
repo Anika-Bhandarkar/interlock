@@ -21,10 +21,11 @@ from interlock.data_collection.pairs import (
     LEFT,
     RELATIONS,
     RIGHT,
-    SEAM_HALF_WIDTH,
+    WINDOW_SHAPE,
     can_fit,
     neighbor_ids,
     orient,
+    pad_to,
     seam_windows,
     side_types,
     to_rgba,
@@ -63,10 +64,10 @@ class EdgeComparator(nn.Module):
 
     Args:
         width: channels in the first block (doubles in each of the 3 blocks).
-        input_shape: (height, width) of a window; (72, 48) for 400 px images cut 10 x 10.
+        input_shape: (height, width) of a window after pad_to; WINDOW_SHAPE for every puzzle.
     """
 
-    def __init__(self, width: int = 32, input_shape: tuple[int, int] = (72, 2 * SEAM_HALF_WIDTH)):
+    def __init__(self, width: int = 32, input_shape: tuple[int, int] = WINDOW_SHAPE):
         super().__init__()
         self.config = {"width": width, "input_shape": tuple(input_shape)}
         self.features = nn.Sequential(
@@ -84,7 +85,7 @@ class EdgeComparator(nn.Module):
         )
 
     def forward(self, windows: torch.Tensor) -> torch.Tensor:
-        """windows: (n, 5, H, W), uint8 straight from seam_windows or float in [0, 1]. Returns (n,) logits."""
+        """windows: (n, 5, H, W), uint8 seam windows after pad_to, or float in [0, 1]. Returns (n,) logits."""
         x = windows.float().div(255) if windows.dtype == torch.uint8 else windows
         return self.head(self.features(x)).squeeze(1)
 
@@ -111,7 +112,7 @@ def score_matrix(model: EdgeComparator, pieces: np.ndarray, masks: np.ndarray, b
         left_ids, right_ids = np.nonzero(can_fit(types, relation))
         for start in range(0, len(left_ids), batch_size):
             batch = slice(start, start + batch_size)
-            windows = seam_windows(rgba, left_ids[batch], right_ids[batch])
+            windows = pad_to(seam_windows(rgba, left_ids[batch], right_ids[batch]), *WINDOW_SHAPE)
             logits[relation, left_ids[batch], right_ids[batch]] = model(windows).float().cpu().numpy()
 
     logits[LEFT] = logits[RIGHT].T  # j left of i  <=>  i right of j

@@ -35,7 +35,7 @@ SA-1B is licensed for research use only, so don't redistribute the images.
 ### Puzzles
 Puzzles are cut on the fly when the dataset is read, so each image can become a different puzzle every epoch (`interlock/data_collection/dataset.py`, `PuzzleDataset`):
 - `grid.py` draws a cell size from 30, 35, ..., 100 px (`CELL_MIN`, `CELL_STEP`, `CELL_MAX` in `cutting.py`) and crops the image to the largest whole grid of square cells, so puzzle size and piece count vary (at least 4 pieces per side).
-- `cutting.py` first draws the puzzle's set of 6 tab shapes (`tab_shapes`), from textbook to funky, then cuts the crop into that grid: every inner edge uses one shape from the set, mirrored or not, with the tab on a random side. Sharing shapes means the model can't match pieces by shape alone. Each inner grid line is also shifted by up to 3.2% of a cell (`GRID_JITTER`), so pieces vary in width and height by up to 6.4%. Each piece comes in a box of `cell + 2 * PAD` pixels placed on the unjittered grid (`PAD = 42`, enough for the tabs of the largest pieces plus the jitter).
+- `cutting.py` first draws the puzzle's set of 6 tab shapes (`tab_shapes`), from textbook to funky, then cuts the crop into that grid: every inner edge uses one shape from the set, mirrored or not, with the tab on a random side. Sharing shapes means the model can't match pieces by shape alone. Grid-line jitter is currently disabled (`GRID_JITTER = 0.0`), so cells within a puzzle have equal dimensions. Each piece comes in a box of `cell + 2 * PAD` pixels placed on the unjittered grid (`PAD = 42`, enough for the tabs of the largest pieces plus the jitter).
 - Puzzle `i` uses seed `i + seed_offset` for both the grid and the tabs, so the val set is reproducible and training gets new grids and tabs every epoch.
 - Before anything goes into a model it is zero-padded, centered, to one fixed size with `pairs.pad_to`, so puzzles of every cell size batch together: whole pieces to `PIECE_SIZE` x `PIECE_SIZE` (184 x 184), seam windows to `WINDOW_SHAPE` (184 x 80). Pieces are never resized, so pixels keep their real scale.
 
@@ -83,9 +83,17 @@ How it works:
   puzzle whose shape fits, re-cut with new grids and tab shapes every epoch).
 - `interlock/models/edge_comparator.py`: the model, `score_matrix`, `evaluate`, save/load.
 ## Solver stages 2-4
-> **Out of date:** the solver still assumes a 10x10 grid (`solve()` doesn't take `rows`/`cols` yet), and the
-> results below are from the earlier Imagenette, fixed 10x10 setup. Comparator checkpoints from before the
-> variable-grid change don't load (the input is now 184 x 80), so retrain first.
+The solver supports variable square and rectangular boards. Dataset entry points read the known board
+size from metadata before shuffling and pass only `rows` and `cols` to the solver; ground-truth piece
+positions are used only to evaluate the answer. Direct calls can use
+`solve(logits, types, rows=rows, cols=cols)`; omitted dimensions retain the 10x10 default.
+Input dimensions are checked against the score matrix and piece count before solving. The visualizers
+use the actual board dimensions, and `solve.py` also reports final accuracy and total scoring/solving
+time grouped by cell size and grid dimensions.
+
+Comparator checkpoints from before the variable-grid change need retraining (the input is now 184 x 80).
+**Historical results below are from the earlier Imagenette, fixed 10x10 setup; they are not validation of
+the current variable-grid dataset.**
 
 `interlock/solver/updaters.py` follows the team plan ("Interlock Approach Deepdive: CNNs + Greedy
 Algorithms"). A *space* is a slot on the board, its *distribution* is a probability over pieces, and its
@@ -112,6 +120,70 @@ uv run python scripts/solve.py --noise 8        # same, with noise added to the 
 uv run python scripts/animate_solve.py --index 3 --out solve.gif     # animated solve (or no --out: window)
 uv run python scripts/visualize_solve.py --index 5 --noise 10 --out solve.png   # static summary figure
 ```
+### Single-tab-shape experiment
+
+`--single-tab-shape` replaces the six randomized curves with one fixed, symmetric canonical curve,
+shared by all internal edges and all puzzles; mirroring is disabled. Tab/blank directions remain random,
+and flat borders and shape-compatibility filtering remain available. This reduces exact-curve clues
+without removing the border anchor or changing to straight seams. It does not eliminate all geometric
+information or prove that earlier performance was overfitting.
+
+First evaluate the existing checkpoint on the changed geometry:
+
+```bash
+uv run python scripts/solve.py --single-tab-shape --num-puzzles 5
+uv run python scripts/visualize.py --single-tab-shape --out single_tab_pieces.png
+```
+
+For a matched training/evaluation experiment, train a separate model (training and validation both use
+the canonical shape), then select that checkpoint explicitly:
+
+```bash
+uv run python scripts/train_comparator.py --single-tab-shape --epochs 2 --num-train 200 --puzzles-per-batch 2 --workers 2
+uv run python scripts/solve.py --single-tab-shape --checkpoint checkpoints/edge_comparator_single_tab.pt --num-puzzles 30
+uv run python scripts/animate_solve.py --single-tab-shape --checkpoint checkpoints/edge_comparator_single_tab.pt --index 0 --out single_tab.gif
+```
+
+The default output for single-tab training is `checkpoints/edge_comparator_single_tab.pt`, preserving
+the ordinary training checkpoint unless you explicitly override `--out`. Use the same seed, image subset,
+and training settings for comparisons. `--single-tab-shape` cannot be combined with `--straight-edges`.
+
+### Straight-edge experiment
+
+Use `--straight-edges` to cut each image into rectangular grid tiles instead of tabbed jigsaw pieces.
+The same crop and grid seeds are used in both modes for comparison. Existing checkpoints can run unchanged:
+seam inputs retain RGB plus two masks and the same 184x80 padded dimensions. Flat-to-flat pairs are
+scored in this mode, and flat-side border restrictions are disabled in every solver stage. Known board
+dimensions and upright piece orientation remain assumptions; no corner identity is supplied. The initial
+seed is still chosen by its best right/below scores, so it can start with the wrong corner without border
+clues. This experiment measures transfer from tabbed training data; accuracy may be lower.
+
+```bash
+uv run python scripts/solve.py --straight-edges --num-puzzles 30
+uv run python scripts/visualize.py --straight-edges --out straight_pieces.png
+uv run python scripts/visualize_solve.py --straight-edges --index 0 --out straight_solve.png
+uv run python scripts/animate_solve.py --straight-edges --index 0 --out straight_solve.gif
+```
+
+Omit the flag for ordinary jigsaw behavior. Dataset puzzles vary their cell size; `--image` in the
+visualizers retains the default 10x10 grid. Straight tiles allow more candidate pairs, which may increase
+scoring time. Training remains on tabbed pieces; this flag is for generation, evaluation, and display.
+
+To isolate the initial-corner choice, add `--anchor-top-left`:
+
+```bash
+uv run python scripts/solve.py --straight-edges --anchor-top-left --num-puzzles 5
+uv run python scripts/animate_solve.py --straight-edges --anchor-top-left --index 0 --out anchored.gif
+```
+
+This evaluation mode reads only the true top-left piece ID from the shuffled ground-truth metadata,
+fixes it at (0, 0), and reserves it throughout all solver stages. Other positions are not supplied to the
+solver. Summaries and visualizers label anchored runs explicitly. Compare with the same command without
+`--anchor-top-left`, using the same checkpoint and seed. This is an assisted assembly diagnostic; direct
+neighbor-ranking evaluation is still the more isolated measure of CNN matching ability.
+
+### Historical fixed-grid results
+
 With the trained comparator all 30 val puzzles are solved perfectly, in about 3 ms per puzzle after the
 ~0.7 s `score_matrix` call. Adding noise to the scores shows how the solver copes with a weaker comparator
 (30 val puzzles, final result):
@@ -130,3 +202,13 @@ accurate, temperature-scale its logits on val data before solving.
 `animate_solve.py` shows the shuffled pieces on the left and the board on the right: each space shows its
 max-piece under a grey overlay once it has a distribution, and turns full color once set (locked by a
 threshold, or placed by stage 4), when the piece also fades out of the pile.
+
+
+`solve.py` reports CNN neighbor `top1`, `mean_rank`, and query counts overall, separately for right/below,
+and by cell/grid size, reusing the score matrix already computed. Each progress line also reports this
+puzzle's CNN ranking. Ranking queries are pooled (larger puzzles contribute more queries); assembly
+percentages remain averages over puzzles. Ties count against the true neighbor. These rankings include
+the existing geometry-based candidate filtering, so straight and tabbed modes have different candidate
+sets; they are not an RGB-only controlled comparison. The anchor is not used to improve CNN rankings.
+With `--noise`, rankings describe the perturbed scores supplied to the solver. Assembly `neighbors`
+continues to mean correct adjacencies on the assembled board, not CNN top-1 accuracy.

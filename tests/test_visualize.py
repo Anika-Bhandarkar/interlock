@@ -64,8 +64,9 @@ def test_load_image_resizes_non_divisible(tmp_path):
     assert image.shape[0] % ROWS == 0 and image.shape[1] % COLS == 0
 
 
-def test_main_saves_figure(tmp_path, monkeypatch):
+@pytest.mark.parametrize("straight_edges", [False, True])
+def test_main_saves_figure(tmp_path, monkeypatch, straight_edges):
     out_path = tmp_path / "viz.png"
-    monkeypatch.setattr(sys, "argv", ["visualize.py", "--seed", "1", "--out", str(out_path)])
+    monkeypatch.setattr(sys, "argv", ["visualize.py", "--seed", "1", "--out", str(out_path)] + (["--straight-edges"] if straight_edges else []))
     visualize.main()
     assert out_path.exists() and out_path.stat().st_size > 0

@@ -219,3 +219,27 @@ def test_evaluate_reports_both_directions(model, processed_dir):
     for direction_metrics in metrics.values():
         assert 0 <= direction_metrics["top1"] <= 1
         assert direction_metrics["mean_rank"] >= 1
+
+
+
+def test_straight_dataset_uses_same_crop_and_grid(processed_dir):
+    from interlock.solver.updaters import assemble, true_grid, puzzle_shape
+    rows = load_manifest("val", processed_dir)
+    puzzles = PuzzleDataset(rows, processed_dir, straight_edges=True)
+    for index in range(len(puzzles)):
+        pieces, masks, positions = puzzles[index]
+        crop, height, width = random_grid(puzzles.load_image(index), np.random.default_rng([index, 1]))
+        assert puzzle_shape(positions) == (height, width)
+        assert (side_types(masks) == 0).all()
+        np.testing.assert_array_equal(assemble(pieces, masks, true_grid(positions, height, width)), crop)
+
+
+def test_single_tab_datasets_share_generation_mode(processed_dir):
+    rows = load_manifest('train', processed_dir)
+    puzzles = PuzzleDataset(rows, processed_dir, single_tab_shape=True)
+    pairs = PairDataset(rows, pairs_per_puzzle=3, augment=False, processed_dir=processed_dir, single_tab_shape=True)
+    assert pairs.puzzles.single_tab_shape
+    np.testing.assert_array_equal(puzzles[0][1], pairs.puzzles[0][1])
+    windows, labels = pairs[0]
+    assert windows.shape == (12,5,*WINDOW_SHAPE)
+    assert labels.sum() == 6

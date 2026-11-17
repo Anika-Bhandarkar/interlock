@@ -37,8 +37,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS, help="DataLoader worker processes")
     parser.add_argument("--device", default="auto", help="auto, mps, cuda or cpu")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--out", type=Path, default=REPO_ROOT / "checkpoints" / "edge_comparator.pt")
-    return parser.parse_args()
+    parser.add_argument("--out", type=Path, default=None, help="checkpoint path (single-tab mode uses a separate default filename)")
+    parser.add_argument("--single-tab-shape", action="store_true", help="train and validate on one fixed symmetric tab shape")
+    args = parser.parse_args()
+    if args.out is None:
+        filename = "edge_comparator_single_tab.pt" if args.single_tab_shape else "edge_comparator.pt"
+        args.out = REPO_ROOT / "checkpoints" / filename
+    return args
 
 
 def mean_top1(metrics: dict[str, dict[str, float]]) -> float:
@@ -51,8 +56,8 @@ def main():
     device = pick_device(args.device)
 
     train_rows = load_manifest("train")[: args.num_train]
-    val_puzzles = PuzzleDataset(load_manifest("val"))
-    train_set = PairDataset(train_rows, args.pairs_per_puzzle, augment=True, seed=args.seed)
+    val_puzzles = PuzzleDataset(load_manifest("val"), single_tab_shape=args.single_tab_shape)
+    train_set = PairDataset(train_rows, args.pairs_per_puzzle, augment=True, seed=args.seed, single_tab_shape=args.single_tab_shape)
     loader = DataLoader(
         train_set,
         batch_size=args.puzzles_per_batch,
@@ -71,7 +76,7 @@ def main():
 
     num_parameters = sum(parameter.numel() for parameter in model.parameters())
     print(f"device {device} | {len(train_rows)} train puzzles, {min(args.eval_puzzles, len(val_puzzles))} val "
-          f"puzzles | window {window_shape} | {num_parameters:,} parameters | {args.workers} workers")
+          f"puzzles | tabs {'single fixed' if args.single_tab_shape else 'six shapes'} | window {window_shape} | {num_parameters:,} parameters | {args.workers} workers")
 
     best_top1 = -1.0
     for epoch in range(args.epochs):
@@ -102,7 +107,7 @@ def main():
 
         if mean_top1(metrics) > best_top1:
             best_top1 = mean_top1(metrics)
-            save_comparator(model, args.out, epoch=epoch + 1, metrics=metrics)
+            save_comparator(model, args.out, epoch=epoch + 1, metrics=metrics, single_tab_shape=args.single_tab_shape)
             print(f"  saved {args.out} (val top-1 {best_top1:.3f})")
 
 

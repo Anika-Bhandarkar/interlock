@@ -136,3 +136,94 @@ def test_animate_main_saves_gif(tmp_path, monkeypatch, image_and_checkpoint):
     monkeypatch.setattr(sys, "argv", ["animate_solve.py", *image_and_checkpoint, "--dpi", "20", "--out", str(out_path)])
     animate_solve.main()
     assert Image.open(out_path).n_frames > 1
+
+
+@pytest.mark.parametrize('rows,cols,cell', [(4, 4, 100), (4, 7, 30)])
+def test_variable_grid_script_plumbing(monkeypatch, rows, cols, cell):
+    image = np.random.default_rng(4).integers(0, 256, (rows * cell, cols * cell, 3), dtype=np.uint8)
+    pieces, masks, positions = shuffle_puzzle(*cut(image, 3, rows, cols), np.random.default_rng(2))
+    n = len(pieces)
+    logits = np.full((4, n, n), -10.0, dtype=np.float32)
+    from interlock.data_collection.pairs import neighbor_ids
+    for relation in range(4):
+        for a, b in neighbor_ids(positions, relation).items():
+            logits[relation, a, b] = 10
+    monkeypatch.setattr(solve, 'score_matrix', lambda *args, **kwargs: logits)
+    _, (_, _, final) = solve.solve_puzzle(None, pieces, masks, rows=rows, cols=cols)
+    np.testing.assert_array_equal(animate_solve.board_image(pieces, masks, final.grid,
+                                  np.ones((rows, cols), dtype=bool)), image)
+    pile = animate_solve.pile_image(pieces, masks, np.zeros(n, dtype=bool), cols=cols)
+    step = pieces.shape[1] + animate_solve.PILE_GAP
+    assert pile.shape == (rows * step, cols * step, 3)
+    _, ax = plt.subplots()
+    visualize_solve.plot_assembly(pieces, masks, final.grid, positions, 'variable', ax=ax)
+    assert not ax.patches
+
+
+def test_solve_puzzle_rejects_mismatched_piece_masks_before_scoring(monkeypatch):
+    monkeypatch.setattr(solve, 'score_matrix', lambda *args, **kwargs: pytest.fail('must validate before scoring'))
+    with pytest.raises(ValueError, match='matching'):
+        solve.solve_puzzle(None, np.zeros((16, 184, 184, 3)), np.zeros((15, 184, 184)), rows=4, cols=4)
+
+
+@pytest.mark.parametrize("straight_edges", [False, True])
+def test_solve_main_uses_dataset_dimensions_and_reports_sizes(monkeypatch, capsys, straight_edges):
+    image = np.zeros((120, 210, 3), dtype=np.uint8)
+    puzzle = cut(image, 3, 4, 7, straight_edges=straight_edges)
+    monkeypatch.setattr(solve, 'load_manifest', lambda split: [])
+    monkeypatch.setattr(solve, 'PuzzleDataset', lambda rows, **kwargs: [puzzle])
+    monkeypatch.setattr(solve, 'load_comparator', lambda *args: None)
+    def scores(model, pieces, masks, **kwargs):
+        assert kwargs['straight_edges'] == straight_edges
+        n = len(pieces)
+        return np.zeros((4, n, n), dtype=np.float32)
+    monkeypatch.setattr(solve, 'score_matrix', scores)
+    monkeypatch.setattr(sys, 'argv', ['solve.py', '--num-puzzles', '1', '--device', 'cpu'] + (['--straight-edges'] if straight_edges else []) + (['--anchor-top-left'] if straight_edges else []))
+    solve.main()
+    output = capsys.readouterr().out
+    assert 'cell 30px | 4x7 (28 pieces)' in output
+    assert 'stage 4:' in output
+    assert 'CNN overall: top1 0.000 | mean_rank 28.00 | queries 45' in output
+    assert 'CNN this puzzle top1' in output
+    assert 'CNN top1 0.000 rank 28.00 queries 45' in output
+    assert ('anchor true-top-left' if straight_edges else 'anchor none') in output
+
+
+@pytest.mark.parametrize('name', ['visualize_solve', 'animate_solve'])
+@pytest.mark.parametrize('straight_edges', [False, True])
+def test_visualizer_main_passes_dataset_dimensions(name, monkeypatch, tmp_path, straight_edges):
+    module = globals()[name]
+    puzzle = cut(np.zeros((120, 210, 3), dtype=np.uint8), 3, 4, 7, straight_edges=straight_edges)
+    requested_mode = straight_edges
+    monkeypatch.setattr(module, 'load_manifest', lambda split: [])
+    monkeypatch.setattr(module, 'PuzzleDataset', lambda rows, **kwargs: [puzzle])
+    monkeypatch.setattr(module, 'load_comparator', lambda *args: None)
+    from interlock.solver.updaters import solve as solve_board
+    def fake_solve(model, pieces, masks, noise, rng, combine, trace=None, *, rows, cols, straight_edges=False, anchor_piece=None):
+        assert straight_edges == requested_mode
+        assert (anchor_piece is not None) == requested_mode
+        assert (rows, cols) == (4, 7)
+        n = len(pieces)
+        logits = np.zeros((4, n, n), dtype=np.float32)
+        return logits, solve_board(logits, side_types(masks), combine, trace, rows=rows, cols=cols, straight_edges=straight_edges, anchor_piece=anchor_piece)
+    monkeypatch.setattr(module, 'solve_puzzle', fake_solve)
+    out = tmp_path / ('solve.gif' if name == 'animate_solve' else 'solve.png')
+    args = [name + '.py', '--device', 'cpu', '--out', str(out)]
+    if straight_edges:
+        args += ['--straight-edges', '--anchor-top-left']
+    if name == 'animate_solve':
+        args += ['--dpi', '10']
+    monkeypatch.setattr(sys, 'argv', args)
+    module.main()
+    assert out.exists()
+
+
+
+def test_ranking_summary_pools_queries_not_puzzle_percentages():
+    ranks = [dict(right=np.array([1]), below=np.array([2])),
+             dict(right=np.array([1, 2, 3]), below=np.array([1, 1]))]
+    metrics = solve.summarize_rankings(ranks)
+    assert metrics['queries'] == 7
+    assert metrics['top1'] == pytest.approx(4/7)
+    assert metrics['mean_rank'] == pytest.approx(11/7)
+    assert solve.summarize_rankings(ranks, 'right')['top1'] == .5

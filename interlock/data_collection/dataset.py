@@ -56,10 +56,15 @@ class PuzzleDataset(Dataset):
     grids and tab shapes.
     """
 
-    def __init__(self, rows: list[dict], processed_dir: Path = PROCESSED_DIR, seed_offset: int = 0):
+    def __init__(self, rows: list[dict], processed_dir: Path = PROCESSED_DIR, seed_offset: int = 0,
+                 *, straight_edges: bool = False, single_tab_shape: bool = False):
+        if straight_edges and single_tab_shape:
+            raise ValueError("straight_edges and single_tab_shape are mutually exclusive")
+        self.single_tab_shape = single_tab_shape
         self.rows = rows
         self.processed_dir = Path(processed_dir)
         self.seed_offset = seed_offset
+        self.straight_edges = straight_edges
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -71,7 +76,7 @@ class PuzzleDataset(Dataset):
         seed = index + self.seed_offset
         # a separate stream from cut's default_rng(seed), so the grid draw isn't correlated with the tab shapes
         crop, rows, cols = random_grid(self.load_image(index), np.random.default_rng([seed, 1]))
-        return cut(crop, seed, rows, cols)
+        return cut(crop, seed, rows, cols, straight_edges=self.straight_edges, single_tab_shape=self.single_tab_shape)
 
 
 class PairDataset(Dataset):
@@ -98,8 +103,9 @@ class PairDataset(Dataset):
         augment: bool = True,
         processed_dir: Path = PROCESSED_DIR,
         seed: int = 0,
+        *, single_tab_shape: bool = False,
     ):
-        self.puzzles = PuzzleDataset(rows, processed_dir)
+        self.puzzles = PuzzleDataset(rows, processed_dir, single_tab_shape=single_tab_shape)
         self.pairs_per_puzzle = pairs_per_puzzle
         self.augment = augment
         self.seed = seed

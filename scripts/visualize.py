@@ -13,9 +13,12 @@ from interlock.data_collection.cutting import (
     COLS,
     ROWS,
     cut,
+    get_corners,
     puzzle_edges,
     sample_curve,
     tab_shapes,
+    tab_control_points,
+    TAB_NOMINAL,
 )
 
 DEFAULT_SIZE = 400
@@ -70,8 +73,8 @@ def plot_pieces(pieces, masks, positions, ax=None, gap_fraction=0.15):
         rgba_piece = np.dstack([piece, mask.astype(np.uint8) * 255])
         left, top = x * spacing, y * spacing
         ax.imshow(rgba_piece, extent=(left, left + box_size, top + box_size, top))
-    ax.set_xlim(0, COLS * spacing)
-    ax.set_ylim(ROWS * spacing, 0)
+    ax.set_xlim(0, (positions[:, 0].max() + 1) * spacing)
+    ax.set_ylim((positions[:, 1].max() + 1) * spacing, 0)
     ax.set_aspect("equal")
     ax.set_title("Pieces")
     ax.axis("off")
@@ -82,15 +85,34 @@ def main():
     parser.add_argument("--image", help="image to cut (default: synthetic gradient)")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out", help="save the figure here instead of showing it")
+    parser.add_argument("--straight-edges", action="store_true", help="cut square grid tiles without tabs")
+    parser.add_argument("--single-tab-shape", action="store_true", help="use one fixed symmetric tab shape across all puzzles")
     args = parser.parse_args()
+    if args.straight_edges and args.single_tab_shape:
+        parser.error("--straight-edges and --single-tab-shape cannot be combined")
 
     image = load_image(args.image)
     # cut draws its edges with puzzle_edges, so with the same seed these edges match the pieces
-    horizontal_edges, vertical_edges = puzzle_edges(*image.shape[:2], np.random.default_rng(args.seed))
-    pieces, masks, positions = cut(image, args.seed)
+    if args.straight_edges:
+        corners = get_corners(*image.shape[:2])
+        horizontal_edges = np.stack([corners[:, :-1], corners[:, 1:]], axis=2)
+        vertical_edges = np.stack([corners[:-1], corners[1:]], axis=2)
+    else:
+        horizontal_edges, vertical_edges = puzzle_edges(*image.shape[:2], np.random.default_rng(args.seed), single_tab_shape=args.single_tab_shape)
+    pieces, masks, positions = cut(image, args.seed, straight_edges=args.straight_edges, single_tab_shape=args.single_tab_shape)
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 6), layout="constrained")
-    plot_tab_shapes(args.seed, ax=axes[0])
+    if args.straight_edges:
+        axes[0].imshow(image)
+        axes[0].set_title("Original (straight grid cuts)")
+        axes[0].axis("off")
+    elif args.single_tab_shape:
+        curve = sample_curve(tab_control_points(**TAB_NOMINAL))
+        axes[0].plot(curve[:, 0], curve[:, 1])
+        axes[0].set_aspect("equal")
+        axes[0].set_title("Fixed symmetric tab shape")
+    else:
+        plot_tab_shapes(args.seed, ax=axes[0])
     plot_edges(image, horizontal_edges, vertical_edges, ax=axes[1])
     plot_pieces(pieces, masks, positions, ax=axes[2])
 

@@ -86,6 +86,45 @@ def edge_scores(logits: np.ndarray, combine: str = "mean") -> np.ndarray:
     return np.maximum(scores, SCORE_FLOOR)
 
 
+def validate_dimensions(rows: int, cols: int) -> None:
+    """Require a nonempty board with integral dimensions."""
+    if any(isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)) or value < 1
+           for value in (rows, cols)):
+        raise ValueError("rows and cols must be positive integers")
+
+
+def validate_board(logits: np.ndarray, types: np.ndarray, rows: int, cols: int) -> None:
+    """Reject inconsistent dimensions before allocating or updating a board."""
+    validate_dimensions(rows, cols)
+    n = rows * cols
+    if logits.shape != (4, n, n):
+        raise ValueError(f"logits must have shape (4, {n}, {n}) for a {rows}x{cols} board, got {logits.shape}")
+    if types.shape != (n, 4):
+        raise ValueError(f"types must have shape ({n}, 4), got {types.shape}")
+    if np.isnan(logits).any() or np.isposinf(logits).any():
+        raise ValueError("logits must contain finite scores or negative infinity")
+    if not np.isin(types, [-1, 0, 1]).all():
+        raise ValueError("types must contain only BLANK (-1), FLAT (0), or TAB (1)")
+
+
+def top_left_anchor(positions: np.ndarray) -> int:
+    """Evaluation helper: identify the true top-left ID after shuffling, using ground truth."""
+    puzzle_shape(positions)
+    return int(np.flatnonzero((positions == (0, 0)).all(axis=1))[0])
+
+
+def puzzle_shape(positions: np.ndarray) -> tuple[int, int]:
+    """Board dimensions from complete dataset metadata, used before shuffling, never for scoring."""
+    if positions.ndim != 2 or positions.shape[1] != 2 or not len(positions):
+        raise ValueError("positions must be a nonempty (N, 2) array")
+    if not np.issubdtype(positions.dtype, np.integer) or (positions < 0).any():
+        raise ValueError("positions must contain nonnegative integer coordinates")
+    cols, rows = positions.max(axis=0) + 1
+    if rows * cols != len(positions) or len(np.unique(positions, axis=0)) != len(positions):
+        raise ValueError("positions must cover every slot of a rectangular board exactly once")
+    return int(rows), int(cols)
+
+
 def slot_borders(rows: int = ROWS, cols: int = COLS) -> np.ndarray:
     """(rows, cols, 4) bool: which sides of each space (in RELATIONS order) lie on the puzzle border."""
     ys, xs = np.mgrid[0:rows, 0:cols]
@@ -95,11 +134,15 @@ def slot_borders(rows: int = ROWS, cols: int = COLS) -> np.ndarray:
     return borders
 
 
-def eligibility(types: np.ndarray, rows: int = ROWS, cols: int = COLS) -> np.ndarray:
+def eligibility(types: np.ndarray, rows: int = ROWS, cols: int = COLS,
+                *, straight_edges: bool = False) -> np.ndarray:
     """(rows, cols, N) bool: True where a piece's flat sides are exactly the space's border sides.
 
-    A space that no piece qualifies for (only possible if side_types misread a mask) allows every piece.
+    Straight-edge mode allows every piece in every slot, without border clues.
+    Otherwise, a space that no piece qualifies for allows every piece as a fallback.
     """
+    if straight_edges:
+        return np.ones((rows, cols, len(types)), dtype=bool)
     flat = types == FLAT  # (N, 4)
     allowed = (flat[None, None] == slot_borders(rows, cols)[:, :, None]).all(axis=3)
     allowed[~allowed.any(axis=2)] = True
@@ -151,6 +194,7 @@ def first_updater(
     rows: int = ROWS,
     cols: int = COLS,
     trace: list[Snapshot] | None = None,
+    *, straight_edges: bool = False, anchor_piece: int | None = None,
 ) -> SolveResult:
     """Stage 2: a distribution for every space, filled best-first from the top-left corner.
 
@@ -158,13 +202,25 @@ def first_updater(
         logits: (4, N, N) from score_matrix, N = rows * cols.
         types: (N, 4) from side_types, for the same pieces.
         combine: "mean" or "product", see the module docstring.
+        anchor_piece: optionally reserve this piece at (0, 0) throughout the solve.
         trace: if given, a Snapshot is appended after each space is filled.
     Returns:
         SolveResult whose grid holds each space's max-piece (pieces may repeat) and `order` the fill order.
     """
+    validate_board(logits, types, rows, cols)
     edges, average = edge_scores(logits, combine), combine == "mean"
-    allowed = eligibility(types, rows, cols)
-    no_pieces_taken = np.zeros(edges.shape[1], dtype=bool)
+    allowed = eligibility(types, rows, cols, straight_edges=straight_edges)
+    if anchor_piece is not None:
+        if (isinstance(anchor_piece, (bool, np.bool_)) or not isinstance(anchor_piece, (int, np.integer))
+                or not 0 <= anchor_piece < edges.shape[1]):
+            raise ValueError("anchor_piece must be a valid integer piece ID")
+        if not allowed[0, 0, anchor_piece]:
+            raise ValueError("anchor_piece is not eligible for the top-left slot")
+    reserved_pieces = np.zeros(edges.shape[1], dtype=bool)
+    initial_locks = np.zeros((rows, cols), dtype=bool)
+    if anchor_piece is not None:
+        reserved_pieces[anchor_piece] = True
+        initial_locks[0, 0] = True
     grid = np.full((rows, cols), EMPTY)
     probs = np.zeros((rows, cols, edges.shape[1]))
     order = []
@@ -174,24 +230,29 @@ def first_updater(
         grid[y, x], probs[y, x] = int(distribution.argmax()), distribution
         order.append((x, y))
         if trace is not None:
-            trace.append(Snapshot("stage 2", grid.copy(), np.zeros((rows, cols), dtype=bool)))
+            trace.append(Snapshot("stage 2", grid.copy(), initial_locks.copy()))
         queue.pop((x, y), None)
         for dx, dy in OFFSETS.values():  # queue the empty neighbors, or re-score them now they have one more
             neighbor_x, neighbor_y = x + dx, y + dy
             if 0 <= neighbor_x < cols and 0 <= neighbor_y < rows and grid[neighbor_y, neighbor_x] == EMPTY:
                 scores, _ = neighbor_scores(edges, grid, neighbor_x, neighbor_y, average)
                 queue[neighbor_x, neighbor_y] = masked_softmax(
-                    scores, candidates(allowed, neighbor_x, neighbor_y, no_pieces_taken)
+                    scores, candidates(allowed, neighbor_x, neighbor_y, reserved_pieces)
                 )
 
     # top-left corner, picked by shape; if several pieces have that shape, prefer the one whose best right and
     # below matches score highest
     seed_scores = edges[RIGHT].max(axis=1) + edges[BELOW].max(axis=1)
-    fill(0, 0, masked_softmax(seed_scores, candidates(allowed, 0, 0, no_pieces_taken)))
+    if anchor_piece is None:
+        seed_distribution = masked_softmax(seed_scores, candidates(allowed, 0, 0, reserved_pieces))
+    else:
+        seed_distribution = np.zeros(edges.shape[1])
+        seed_distribution[anchor_piece] = 1.0
+    fill(0, 0, seed_distribution)
     while queue:
         x, y = max(queue, key=lambda space: queue[space].max())  # space with the most confident max-piece
         fill(x, y, queue[x, y])
-    return SolveResult(grid, probs, order)
+    return SolveResult(grid, probs, order, initial_locks if anchor_piece is not None else None)
 
 
 # ------------------------------------------------------------------ stage 3
@@ -223,6 +284,7 @@ def multistage_updater(
     stable_rounds: int = STABLE_ROUNDS,
     max_rounds: int = MAX_ROUNDS,
     trace: list[Snapshot] | None = None,
+    *, straight_edges: bool = False,
 ) -> SolveResult:
     """Stage 3: re-score every space against all 4 neighbors, round by round, locking pieces by the thresholds.
 
@@ -239,10 +301,11 @@ def multistage_updater(
     edges, average = edge_scores(logits, combine), combine == "mean"
     rows, cols = start.grid.shape
     num_pieces = edges.shape[1]
-    allowed = eligibility(types, rows, cols)
+    allowed = eligibility(types, rows, cols, straight_edges=straight_edges)
     grid, probs = start.grid.copy(), start.probs.copy()
-    locked = np.zeros((rows, cols), dtype=bool)
+    locked = np.zeros((rows, cols), dtype=bool) if start.locked is None else start.locked.copy()
     locked_pieces = np.zeros(num_pieces, dtype=bool)
+    locked_pieces[grid[locked]] = True
     sole_rounds = np.zeros((rows, cols), dtype=int)  # rounds in a row each space's max-piece was max nowhere else
     still_rounds = 0  # rounds in a row in which no max-piece moved
 
@@ -285,7 +348,8 @@ def multistage_updater(
 # ------------------------------------------------------------------ stage 4
 
 
-def final_assignment(result: SolveResult, types: np.ndarray, trace: list[Snapshot] | None = None) -> SolveResult:
+def final_assignment(result: SolveResult, types: np.ndarray, trace: list[Snapshot] | None = None,
+                     *, straight_edges: bool = False) -> SolveResult:
     """Stage 4: give every unlocked space a different piece with the Hungarian algorithm.
 
     Locked spaces keep their pieces. The remaining pieces go to the remaining spaces so that the total
@@ -300,7 +364,7 @@ def final_assignment(result: SolveResult, types: np.ndarray, trace: list[Snapsho
     free_ys, free_xs = np.nonzero(~locked)
     free_pieces = np.setdiff1d(np.arange(num_pieces), grid[locked])
     cost = -np.log(np.maximum(result.probs[free_ys, free_xs][:, free_pieces], 1e-12))
-    cost += np.where(eligibility(types, rows, cols)[free_ys, free_xs][:, free_pieces], 0.0, 1e6)
+    cost += np.where(eligibility(types, rows, cols, straight_edges=straight_edges)[free_ys, free_xs][:, free_pieces], 0.0, 1e6)
     space_index, piece_index = linear_sum_assignment(cost)
     grid[free_ys[space_index], free_xs[space_index]] = free_pieces[piece_index]
     if trace is not None:
@@ -309,15 +373,19 @@ def final_assignment(result: SolveResult, types: np.ndarray, trace: list[Snapsho
 
 
 def solve(
-    logits: np.ndarray, types: np.ndarray, combine: str = "mean", trace: list[Snapshot] | None = None
+    logits: np.ndarray, types: np.ndarray, combine: str = "mean", trace: list[Snapshot] | None = None,
+    *, rows: int = ROWS, cols: int = COLS, straight_edges: bool = False, anchor_piece: int | None = None,
 ) -> tuple[SolveResult, ...]:
     """Run stages 2, 3 and 4. Returns all three results; the last one is the answer.
 
+    anchor_piece optionally fixes the supplied piece ID at (0, 0) throughout all stages.
+    straight_edges disables border eligibility because every grid tile has four flat sides.
+    rows and cols specify the known board dimensions (defaults preserve the 10x10 API).
     If `trace` is given, every stage appends its Snapshots to it.
     """
-    first = first_updater(logits, types, combine, trace=trace)
-    refined = multistage_updater(logits, types, first, combine, trace=trace)
-    return first, refined, final_assignment(refined, types, trace)
+    first = first_updater(logits, types, combine, rows=rows, cols=cols, trace=trace, straight_edges=straight_edges, anchor_piece=anchor_piece)
+    refined = multistage_updater(logits, types, first, combine, trace=trace, straight_edges=straight_edges)
+    return first, refined, final_assignment(refined, types, trace, straight_edges=straight_edges)
 
 
 # ------------------------------------------------------------------ helpers
@@ -351,7 +419,7 @@ def placement_metrics(grid: np.ndarray, positions: np.ndarray) -> dict[str, floa
     placed_at = positions[grid]  # (rows, cols, 2): true (x, y) of the piece in each slot
     right_ok = (placed_at[:, 1:] - placed_at[:, :-1] == (1, 0)).all(axis=2)
     below_ok = (placed_at[1:] - placed_at[:-1] == (0, 1)).all(axis=2)
-    neighbors = float(right_ok.sum() + below_ok.sum()) / (right_ok.size + below_ok.size)
+    neighbors = float(right_ok.sum() + below_ok.sum()) / max(1, right_ok.size + below_ok.size)
     return {"direct": direct, "neighbors": neighbors, "perfect": float(direct == 1.0)}
 
 

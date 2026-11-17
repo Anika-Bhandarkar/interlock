@@ -211,3 +211,80 @@ def test_solve_trace_records_every_step(types, logits):
     assert trace[NUM_PIECES].label == "stage 3, round 1"
     assert trace[-1].label == "stage 4" and trace[-1].locked.all()
     np.testing.assert_array_equal(trace[-1].grid, final.grid)
+
+
+@pytest.mark.parametrize('rows,cols,cell', [(4, 4, 100), (10, 10, 40), (13, 13, 30), (4, 7, 55)])
+@pytest.mark.parametrize('combine', ['mean', 'product'])
+def test_variable_grid_oracle_reconstructs_image(rows, cols, cell, combine):
+    image = np.random.default_rng(11).integers(0, 256, (rows * cell, cols * cell, 3), dtype=np.uint8)
+    pieces, masks, positions = shuffle_puzzle(*cut(image, 3, rows, cols), np.random.default_rng(1))
+    types = side_types(masks)
+    n = len(pieces)
+    logits = np.full((4, n, n), -10.0, dtype=np.float32)
+    for relation in range(4):
+        for a, b in neighbor_ids(positions, relation).items():
+            logits[relation, a, b] = 10
+        logits[relation][~can_fit(types, relation)] = -np.inf
+    trace = []
+    first, refined, final = solve(logits, types, combine, trace, rows=rows, cols=cols)
+    for result in (first, refined, final):
+        assert result.grid.shape == (rows, cols)
+        assert placement_metrics(result.grid, positions)['perfect'] == 1
+    assert sorted(final.grid.ravel()) == list(range(n))
+    assert all(snapshot.grid.shape == (rows, cols) for snapshot in trace)
+    np.testing.assert_array_equal(assemble(pieces, masks, final.grid), image)
+
+
+@pytest.mark.parametrize('rows,cols', [(0, 4), (4, -1), (4.5, 4), (True, 4), (4, 5)])
+def test_solve_rejects_invalid_dimensions(rows, cols):
+    with pytest.raises(ValueError):
+        solve(np.zeros((4, 16, 16)), np.zeros((16, 4)), rows=rows, cols=cols)
+
+
+def test_solve_rejects_inconsistent_types_and_scores():
+    with pytest.raises(ValueError, match='types must have shape'):
+        solve(np.zeros((4, 16, 16)), np.zeros((15, 4)), rows=4, cols=4)
+    with pytest.raises(ValueError, match='finite scores'):
+        solve(np.full((4, 16, 16), np.nan), np.zeros((16, 4)), rows=4, cols=4)
+
+
+def test_puzzle_shape_requires_complete_unique_metadata():
+    from interlock.solver.updaters import puzzle_shape
+    positions = np.array([(x, y) for y in range(4) for x in range(7)])
+    assert puzzle_shape(positions[::-1]) == (4, 7)
+    for invalid in (positions[:-1], np.zeros((28, 2), dtype=int), positions.astype(float)):
+        with pytest.raises(ValueError):
+            puzzle_shape(invalid)
+
+
+@pytest.mark.parametrize('combine', ['mean', 'product'])
+def test_true_top_left_anchor_is_fixed_and_never_reused(combine):
+    from interlock.solver.updaters import top_left_anchor
+    rows, cols, cell = 4, 5, 30
+    image = np.random.default_rng(8).integers(0, 256, (rows*cell, cols*cell, 3), dtype=np.uint8)
+    pieces, masks, positions = shuffle_puzzle(*cut(image, 0, rows, cols, straight_edges=True), np.random.default_rng(9))
+    anchor = top_left_anchor(positions)
+    assert anchor != 0  # ID must be found after shuffling, not assumed from original order.
+    n = len(pieces)
+    scores = np.full((4,n,n), -10., dtype=np.float32)
+    for relation in range(4):
+        for a,b in neighbor_ids(positions, relation).items():
+            scores[relation,a,b] = 10.
+    # Make the anchor look attractive everywhere; it must remain reserved for (0, 0).
+    scores[:,:,anchor] = 25.
+    trace = []
+    results = solve(scores, side_types(masks), combine, trace, rows=rows, cols=cols,
+                    straight_edges=True, anchor_piece=anchor)
+    for result in results:
+        assert result.grid[0,0] == anchor and result.locked[0,0]
+        assert (result.grid == anchor).sum() == 1
+        assert result.probs[0,0,anchor] == 1
+    assert all(snap.grid[0,0] == anchor and snap.locked[0,0] for snap in trace)
+    assert sorted(results[-1].grid.ravel()) == list(range(n))
+
+
+@pytest.mark.parametrize('anchor', [-1, 16, 1.5, True])
+def test_anchor_id_validation(anchor):
+    with pytest.raises(ValueError, match='anchor_piece'):
+        solve(np.zeros((4,16,16)), np.zeros((16,4)), rows=4, cols=4,
+              straight_edges=True, anchor_piece=anchor)

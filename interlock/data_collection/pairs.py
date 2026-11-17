@@ -75,7 +75,7 @@ def side_types(masks: np.ndarray) -> np.ndarray:
 
     Read straight off the mask, so it works on shuffled pieces with no ground truth:
     TAB if the piece reaches past its cell edge by SIDE_PROBE, BLANK if a hole cuts that far into the
-    middle of the side, FLAT otherwise (only border pieces have flat sides).
+    middle of the side, FLAT otherwise (only borders are flat in tabbed puzzles; grid tiles are flat on every side).
     """
     box = masks.shape[1]
     cell = cell_size(box)
@@ -93,13 +93,16 @@ def side_types(masks: np.ndarray) -> np.ndarray:
     return types
 
 
-def can_fit(types: np.ndarray, relation: int) -> np.ndarray:
+def can_fit(types: np.ndarray, relation: int, *, straight_edges: bool = False) -> np.ndarray:
     """(N, N) bool: True where piece j could be piece i's `relation` neighbor by shape alone.
 
     Side `relation` of i must be a tab and the facing side of j a blank, or the other way round.
+    Straight-edge mode additionally permits flat-to-flat pairs.
     A piece never fits next to itself.
     """
     fits = np.outer(types[:, relation], types[:, opposite(relation)]) == -1
+    if straight_edges:
+        fits |= np.outer(types[:, relation] == FLAT, types[:, opposite(relation)] == FLAT)
     np.fill_diagonal(fits, False)
     return fits
 

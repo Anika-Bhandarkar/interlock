@@ -14,11 +14,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.patches import Rectangle
 
-from interlock.data_collection.cutting import COLS, ROWS, cut
+from interlock.data_collection.cutting import cut
 from interlock.data_collection.dataset import PuzzleDataset, load_manifest
 from interlock.data_collection.pairs import cell_size
 from interlock.models.edge_comparator import load_comparator, pick_device
-from interlock.solver.updaters import COMBINE_MODES, assemble, placement_metrics, shuffle_puzzle, true_grid
+from interlock.solver.updaters import COMBINE_MODES, assemble, placement_metrics, puzzle_shape, top_left_anchor, shuffle_puzzle, true_grid
 from solve import DEFAULT_CHECKPOINT, solve_puzzle  # scripts/ is on sys.path when running a script in it
 from visualize import load_image, plot_pieces
 
@@ -71,31 +71,46 @@ def main():
     parser.add_argument("--device", default="auto", help="auto, mps, cuda or cpu")
     parser.add_argument("--seed", type=int, default=0, help="seed for cutting --image, shuffling and --noise")
     parser.add_argument("--out", help="save the figure here instead of showing it")
+    parser.add_argument("--straight-edges", action="store_true", help="use square grid tiles without tabs; board dimensions remain known")
+    parser.add_argument("--anchor-top-left", action="store_true", help="evaluation only: fix the true top-left piece using ground-truth metadata")
+    parser.add_argument("--single-tab-shape", action="store_true", help="use one fixed symmetric tab shape across all puzzles")
     args = parser.parse_args()
+    if args.straight_edges and args.single_tab_shape:
+        parser.error("--straight-edges and --single-tab-shape cannot be combined")
 
     if args.image:
         image = load_image(args.image)
-        puzzle = cut(image, args.seed)
+        puzzle = cut(image, args.seed, straight_edges=args.straight_edges, single_tab_shape=args.single_tab_shape)
     else:
-        puzzles = PuzzleDataset(load_manifest("val"))
-        image, puzzle = puzzles.load_image(args.index), puzzles[args.index]
+        puzzles = PuzzleDataset(load_manifest("val"), straight_edges=args.straight_edges, single_tab_shape=args.single_tab_shape)
+        puzzle = puzzles[args.index]
+        image = assemble(puzzle[0], puzzle[1], true_grid(puzzle[2], *puzzle_shape(puzzle[2])))
+    rows, cols = puzzle_shape(puzzle[2])
     rng = np.random.default_rng(args.seed)
     pieces, masks, positions = shuffle_puzzle(*puzzle, rng)
 
     model = load_comparator(args.checkpoint, pick_device(args.device))
-    _, (first, _, final) = solve_puzzle(model, pieces, masks, args.noise, rng, args.combine)
+    _, (first, _, final) = solve_puzzle(model, pieces, masks, args.noise, rng, args.combine, rows=rows, cols=cols, straight_edges=args.straight_edges, anchor_piece=top_left_anchor(positions) if args.anchor_top_left else None)
 
     fig, axes = plt.subplots(2, 3, figsize=(18, 12), layout="constrained")
     axes[0, 0].imshow(image)
     axes[0, 0].set_title("Original")
     axes[0, 0].axis("off")
-    shuffled_layout = np.array([(index % COLS, index // COLS) for index in range(ROWS * COLS)])
+    shuffled_layout = np.array([(index % cols, index // cols) for index in range(len(pieces))])
     plot_pieces(pieces, masks, shuffled_layout, ax=axes[0, 1])
     axes[0, 1].set_title("Shuffled pieces")
     plot_fill_order(first.order, first.grid.shape, ax=axes[0, 2])
     plot_assembly(pieces, masks, first.grid, positions, "Stage 2", ax=axes[1, 0])
     plot_assembly(pieces, masks, final.grid, positions, "Final", ax=axes[1, 1])
     plot_confidence(final.confidence, final.locked, ax=axes[1, 2])
+
+    labels = []
+    if args.single_tab_shape:
+        labels.append("Single fixed tab shape")
+    if args.anchor_top_left:
+        labels.append("Anchored evaluation: true top-left piece supplied")
+    if labels:
+        fig.suptitle(" | ".join(labels))
 
     if args.out:
         fig.savefig(args.out, dpi=120)

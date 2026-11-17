@@ -14,11 +14,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.animation import FuncAnimation, PillowWriter
 
-from interlock.data_collection.cutting import COLS, PAD, ROWS, cut
+from interlock.data_collection.cutting import PAD, cut
 from interlock.data_collection.dataset import PuzzleDataset, load_manifest
 from interlock.data_collection.pairs import cell_size
 from interlock.models.edge_comparator import load_comparator, pick_device
-from interlock.solver.updaters import COMBINE_MODES, EMPTY, Snapshot, placement_metrics, shuffle_puzzle
+from interlock.solver.updaters import COMBINE_MODES, EMPTY, Snapshot, placement_metrics, puzzle_shape, top_left_anchor, shuffle_puzzle
 from solve import DEFAULT_CHECKPOINT, solve_puzzle  # scripts/ is on sys.path when running a script in it
 from visualize import load_image
 
@@ -56,14 +56,15 @@ def board_image(pieces: np.ndarray, masks: np.ndarray, grid: np.ndarray, locked:
     return canvas[PAD:-PAD, PAD:-PAD]
 
 
-def pile_image(pieces: np.ndarray, masks: np.ndarray, is_set: np.ndarray) -> np.ndarray:
+def pile_image(pieces: np.ndarray, masks: np.ndarray, is_set: np.ndarray, cols: int | None = None) -> np.ndarray:
     """The pieces in their shuffled order on a grid; pieces already set on the board are faded out."""
+    cols = cols or int(np.ceil(np.sqrt(len(pieces))))
     box = pieces.shape[1]
     step = box + PILE_GAP
-    num_rows = -(-len(pieces) // COLS)  # ceiling division
-    canvas = np.full((num_rows * step, COLS * step, 3), BACKGROUND, dtype=np.uint8)
+    num_rows = -(-len(pieces) // cols)  # ceiling division
+    canvas = np.full((num_rows * step, cols * step, 3), BACKGROUND, dtype=np.uint8)
     for piece_id, (piece, mask) in enumerate(zip(pieces, masks)):
-        top, left = (piece_id // COLS) * step, (piece_id % COLS) * step
+        top, left = (piece_id // cols) * step, (piece_id % cols) * step
         shown = blend(piece, BACKGROUND, PILE_FADE) if is_set[piece_id] else piece
         canvas[top : top + box, left : left + box][mask] = shown[mask]
     return canvas
@@ -90,20 +91,26 @@ def main():
     parser.add_argument("--fps", type=int, default=12)
     parser.add_argument("--dpi", type=int, default=60, help="resolution of the saved .gif (60 -> 720x384)")
     parser.add_argument("--out", help="save a .gif here instead of playing the animation in a window")
+    parser.add_argument("--straight-edges", action="store_true", help="use square grid tiles without tabs; board dimensions remain known")
+    parser.add_argument("--anchor-top-left", action="store_true", help="evaluation only: fix the true top-left piece using ground-truth metadata")
+    parser.add_argument("--single-tab-shape", action="store_true", help="use one fixed symmetric tab shape across all puzzles")
     args = parser.parse_args()
+    if args.straight_edges and args.single_tab_shape:
+        parser.error("--straight-edges and --single-tab-shape cannot be combined")
 
-    puzzle = cut(load_image(args.image), args.seed) if args.image else PuzzleDataset(load_manifest("val"))[args.index]
+    puzzle = cut(load_image(args.image), args.seed, straight_edges=args.straight_edges, single_tab_shape=args.single_tab_shape) if args.image else PuzzleDataset(load_manifest("val"), straight_edges=args.straight_edges, single_tab_shape=args.single_tab_shape)[args.index]
+    rows, cols = puzzle_shape(puzzle[2])
     rng = np.random.default_rng(args.seed)
     pieces, masks, positions = shuffle_puzzle(*puzzle, rng)
     model = load_comparator(args.checkpoint, pick_device(args.device))
     trace = []
-    _, (*_, final) = solve_puzzle(model, pieces, masks, args.noise, rng, args.combine, trace)
+    _, (*_, final) = solve_puzzle(model, pieces, masks, args.noise, rng, args.combine, trace, rows=rows, cols=cols, straight_edges=args.straight_edges, anchor_piece=top_left_anchor(positions) if args.anchor_top_left else None)
     metrics = placement_metrics(final.grid, positions)
 
     fig, (pile_ax, board_ax) = plt.subplots(1, 2, figsize=(12, 6.4), layout="constrained")
-    empty_grid = np.full((ROWS, COLS), EMPTY)
-    no_locks = np.zeros((ROWS, COLS), dtype=bool)
-    pile = pile_ax.imshow(pile_image(pieces, masks, np.zeros(len(pieces), dtype=bool)))
+    empty_grid = np.full((rows, cols), EMPTY)
+    no_locks = np.zeros((rows, cols), dtype=bool)
+    pile = pile_ax.imshow(pile_image(pieces, masks, np.zeros(len(pieces), dtype=bool), cols=cols))
     board = board_ax.imshow(board_image(pieces, masks, empty_grid, no_locks))
     pile_ax.set_title("Pieces")
     for ax in (pile_ax, board_ax):
@@ -117,7 +124,7 @@ def main():
             grid, locked, label = snapshot.grid, snapshot.locked, snapshot.label
         is_set = np.zeros(len(pieces), dtype=bool)
         is_set[grid[locked]] = True
-        pile.set_data(pile_image(pieces, masks, is_set))
+        pile.set_data(pile_image(pieces, masks, is_set, cols=cols))
         board.set_data(board_image(pieces, masks, grid, locked))
         title = f"{label}: {(grid != EMPTY).sum()} spaces guessed (grey), {locked.sum()} set (color)"
         if label == "stage 4":
@@ -126,6 +133,14 @@ def main():
         return pile, board
 
     animation = FuncAnimation(fig, draw, frames=frame_plan(trace), interval=1000 / args.fps, blit=False)
+    labels = []
+    if args.single_tab_shape:
+        labels.append("Single fixed tab shape")
+    if args.anchor_top_left:
+        labels.append("Anchored evaluation: true top-left piece supplied")
+    if labels:
+        fig.suptitle(" | ".join(labels))
+
     if args.out:
         animation.save(args.out, writer=PillowWriter(fps=args.fps), dpi=args.dpi)
         print(f"Saved {args.out} ({len(trace)} solver steps)")

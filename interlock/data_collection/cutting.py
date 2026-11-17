@@ -43,7 +43,8 @@ PAD = 42  # margin around each cell in a piece's box; must exceed max tab reach 
 # every model input is padded to this side, the box of a CELL_MAX piece; cut() itself returns tighter cell + 2 * PAD boxes
 PIECE_SIZE = CELL_MAX + 2 * PAD
 
-def cut(image: np.ndarray, seed: int, rows: int = ROWS, cols: int = COLS) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def cut(image: np.ndarray, seed: int, rows: int = ROWS, cols: int = COLS,
+        *, straight_edges: bool = False, single_tab_shape: bool = False) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Cut an image into a rows x cols grid of jigsaw pieces.
     Precondition: image height is divisible by rows and image width is divisible by cols.
@@ -53,6 +54,8 @@ def cut(image: np.ndarray, seed: int, rows: int = ROWS, cols: int = COLS) -> tup
         seed: random seed; the same seed always gives the same puzzle.
         rows: number of pieces down the puzzle.
         cols: number of pieces across the puzzle.
+        straight_edges: extract rectangular grid cells without tabs or indentations.
+        single_tab_shape: use the same symmetric canonical tab on all internal edges and puzzles.
 
     Returns (N = rows * cols, B_h = H / rows + 2 * PAD, B_w = W / cols + 2 * PAD; B_h = B_w when the
     cells are square):
@@ -62,14 +65,22 @@ def cut(image: np.ndarray, seed: int, rows: int = ROWS, cols: int = COLS) -> tup
         positions: (N, 2) int. positions[i] = (x, y) grid coordinates of pieces[i], x = column and
             y = row, with (0, 0) the top left piece. Pieces are returned in grid order (not shuffled).
     """
+    if straight_edges and single_tab_shape:
+        raise ValueError("straight_edges and single_tab_shape are mutually exclusive")
     if image.ndim != 3 or image.shape[2] != 3:
         raise ValueError(f"image must be (H, W, 3), got shape {image.shape}")
     if image.dtype != np.uint8:
         raise ValueError(f"image must be uint8, got dtype {image.dtype}")
 
     height, width = image.shape[:2]
-    horizontal_edges, vertical_edges = puzzle_edges(height, width, np.random.default_rng(seed), rows, cols)
-    piece_ids = piece_map(horizontal_edges, vertical_edges, height, width)
+    if straight_edges:
+        # Validate the same grid constraints, then assign exact half-open rectangular cells.
+        get_corners(height, width, rows, cols)
+        cell_h, cell_w = height // rows, width // cols
+        piece_ids = (np.arange(height)[:, None] // cell_h) * cols + np.arange(width)[None, :] // cell_w
+    else:
+        horizontal_edges, vertical_edges = puzzle_edges(height, width, np.random.default_rng(seed), rows, cols, single_tab_shape=single_tab_shape)
+        piece_ids = piece_map(horizontal_edges, vertical_edges, height, width)
     pieces, masks = extract_pieces(image, piece_ids, rows, cols)
 
     # (x, y) = (column, row) built directly; flipping with [:, ::-1] gives negative strides that torch rejects
@@ -79,16 +90,16 @@ def cut(image: np.ndarray, seed: int, rows: int = ROWS, cols: int = COLS) -> tup
 
 
 def puzzle_edges(height: int, width: int, rng: np.random.Generator, rows: int = ROWS,
-                 cols: int = COLS) -> tuple[np.ndarray, np.ndarray]:
+                 cols: int = COLS, *, single_tab_shape: bool = False) -> tuple[np.ndarray, np.ndarray]:
     """Every edge of one puzzle, drawn from rng in a fixed order: the set of tab shapes, then the jittered grid,
     then each edge's shape, mirror and side. cut() uses this, so the same rng seed always gives the same edges.
 
     Returns:
         horizontal_edges, vertical_edges: as returned by get_edges
     """
-    shapes = tab_shapes(rng)
+    shapes = tab_control_points(**TAB_NOMINAL)[None] if single_tab_shape else tab_shapes(rng)
     corners = get_corners(height, width, rows, cols, rng)
-    return get_edges(corners, rng, shapes)
+    return get_edges(corners, rng, shapes, mirror_shapes=not single_tab_shape)
 
 
 def get_corners(height: int, width: int, rows: int = ROWS, cols: int = COLS, rng: np.random.Generator | None = None,
@@ -269,7 +280,8 @@ def place_edge(curve: np.ndarray, start: np.ndarray, end: np.ndarray, sign: int)
 
     return points
 
-def get_edges(corners: np.ndarray, rng: np.random.Generator, shapes: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+def get_edges(corners: np.ndarray, rng: np.random.Generator, shapes: np.ndarray | None = None,
+              *, mirror_shapes: bool = True) -> tuple[np.ndarray, np.ndarray]:
     """Takes in the puzzle's corners and returns sampled points along every jigsaw edge.
     Border edges are straight; each inner edge gets a random shape from the puzzle's set, mirrored or not,
     with the tab on a random side.
@@ -297,7 +309,7 @@ def get_edges(corners: np.ndarray, rng: np.random.Generator, shapes: np.ndarray 
         if is_border:
             return place_edge(curves[0], start, end, 0)
         curve = curves[rng.integers(len(curves))]
-        if rng.random() < 0.5:  # mirror along the edge, still running from (0, 0) to (1, 0)
+        if mirror_shapes and rng.random() < 0.5:  # mirror along the edge, still running from (0, 0) to (1, 0)
             curve = np.column_stack([1 - curve[::-1, 0], curve[::-1, 1]])
         return place_edge(curve, start, end, rng.choice([-1, 1]))
 

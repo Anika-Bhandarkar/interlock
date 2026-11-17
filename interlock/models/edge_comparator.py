@@ -91,7 +91,8 @@ class EdgeComparator(nn.Module):
 
 
 @torch.no_grad()
-def score_matrix(model: EdgeComparator, pieces: np.ndarray, masks: np.ndarray, batch_size: int = 1024) -> np.ndarray:
+def score_matrix(model: EdgeComparator, pieces: np.ndarray, masks: np.ndarray, batch_size: int = 1024,
+                 *, straight_edges: bool = False) -> np.ndarray:
     """(4, N, N) float32 logits: logits[r, i, j] scores piece j as piece i's RELATIONS[r] neighbor.
 
     Only "right" and "below" go through the model (pieces rotated so "below" reads as "right");
@@ -99,6 +100,7 @@ def score_matrix(model: EdgeComparator, pieces: np.ndarray, masks: np.ndarray, b
 
     Args:
         pieces, masks: as returned by cut(), in any order (the solver sees them shuffled).
+        straight_edges: allow flat-to-flat seams for grid tiles.
     """
     model.eval()
     device = next(model.parameters()).device
@@ -109,7 +111,7 @@ def score_matrix(model: EdgeComparator, pieces: np.ndarray, masks: np.ndarray, b
     for direction in DIRECTIONS:
         relation = RELATIONS.index(direction)
         rgba = to_rgba(*orient(pieces, masks, relation)).to(device)
-        left_ids, right_ids = np.nonzero(can_fit(types, relation))
+        left_ids, right_ids = np.nonzero(can_fit(types, relation, straight_edges=straight_edges))
         for start in range(0, len(left_ids), batch_size):
             batch = slice(start, start + batch_size)
             windows = pad_to(seam_windows(rgba, left_ids[batch], right_ids[batch]), *WINDOW_SHAPE)
@@ -142,7 +144,10 @@ def evaluate(model: EdgeComparator, puzzles, num_puzzles: int | None = None) -> 
     all_ranks = {direction: [] for direction in DIRECTIONS}
     for index in range(num_puzzles):
         pieces, masks, positions = puzzles[index]
-        for direction, ranks in neighbor_ranks(score_matrix(model, pieces, masks), positions).items():
+        for direction, ranks in neighbor_ranks(
+            score_matrix(model, pieces, masks, straight_edges=getattr(puzzles, "straight_edges", False)),
+            positions,
+        ).items():
             all_ranks[direction].append(ranks)
     metrics = {}
     for direction, ranks in all_ranks.items():

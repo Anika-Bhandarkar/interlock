@@ -14,3 +14,23 @@ __pycache__/
 # Training outputs
 **/checkpoints/
 **/runs/
+
+# Reproducible local validation viewer caches
+artifacts/viewer_cache/
+
+# Local experiments and generated outputs
+/artifacts/
+/pieces.png
+/solve.png
+/*.gif
+*.log
+.pytest_cache/
+.DS_Store
+
+# Model weights and local credentials
+*.pt
+*.pth
+.env
+.env.*
+!.env.example
+!.env.template

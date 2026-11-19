@@ -18,13 +18,13 @@ let wrongSlots=[];
 let updaterData=null,updaterRequest=0;
 const delay = ms => new Promise(resolve => setTimeout(resolve,ms));
 const selection = () => ({model:$('model').value,category,index:mode==='custom'?0:Number($('image-number').value)-1,anchor:anchored&&category.startsWith('flat_')?1:0,strategy:category.startsWith('flat_')?strategy:'grid',...(mode==='custom'?{source:customSource,grid:$('grid-size').value}:{})});
-const isFree = s => s==='strongest'||s==='shrink';
+const isFree = s => s==='strongest'||s==='shrink'||s==='bounded';
 const pct = x => `${(x*100).toFixed(1)}%`;
 function stop(){clearTimeout(timer);timer=null;$('play').textContent='▶';$('play').setAttribute('aria-label','Play assembly');}
 function anchorUI(){
   const flat=category.startsWith('flat_');
   $('anchor-control').hidden=!flat;
-  $('anchor-note').textContent=flat?(strategy==='shrink'?'Strongest-pair growth, then a frame around it shrinks one side at a time to the board size; evicted pieces move to their best empty cell inside. A swap polish follows. Uses the piece count for the board size, never the layout.':strategy==='strongest'?'Strongest pair seeds an open board. Growth uses matching scores only; no corner or rectangular boundary is supplied.':anchored?'Anchored evaluation supplies the true top-left piece. All other placements are inferred.':'Unanchored evaluation. The solver chooses its own starting piece.'):mode==='custom'?'Regular jigsaw cuts with known board dimensions and upright pieces.':'Same held-out images. Outlines and colors change according to the selected category.';
+  $('anchor-note').textContent=flat?(strategy==='bounded'?'Grows from the strongest pair, but never wider or taller than the board, filling the most clear-cut slot first (best minus second-best fit, plus half the best fit). A swap polish follows. Uses the piece count for the board size, never the layout.':strategy==='shrink'?'Strongest-pair growth, then a frame around it shrinks one side at a time to the board size; evicted pieces move to their best empty cell inside. A swap polish follows. Uses the piece count for the board size, never the layout.':strategy==='strongest'?'Strongest pair seeds an open board. Growth uses matching scores only; no corner or rectangular boundary is supplied.':anchored?'Anchored evaluation supplies the true top-left piece. All other placements are inferred.':'Unanchored evaluation. The solver chooses its own starting piece.'):mode==='custom'?'Regular jigsaw cuts with known board dimensions and upright pieces.':'Same held-out images. Outlines and colors change according to the selected category.';
 }
 function setCategory(id){
   category=id;
@@ -50,7 +50,7 @@ async function load(){
   for(const id of ['free-placed','free-recall','free-bounds'])$(id).textContent='—';
   $('location-label').textContent=free?'ALIGNED ACCURACY':'PLACEMENT ACCURACY';
   $('neighbor-label').textContent=free?'NEIGHBOR PRECISION':'NEIGHBORS';
-  document.querySelectorAll('.timeline-labels span').forEach((el,i)=>el.textContent=(s.strategy==='shrink'?['STRONGEST PAIR','SHRINKING FRAME','SWAP POLISH']:free?['STRONGEST PAIR','OUTWARD GROWTH','FREE ASSEMBLY']:['INITIAL PLACEMENT','REFINEMENT','FINAL ASSIGNMENT'])[i]);
+  document.querySelectorAll('.timeline-labels span').forEach((el,i)=>el.textContent=(s.strategy==='bounded'?['STRONGEST PAIR','BOUNDED GROWTH','SWAP POLISH']:s.strategy==='shrink'?['STRONGEST PAIR','SHRINKING FRAME','SWAP POLISH']:free?['STRONGEST PAIR','OUTWARD GROWTH','FREE ASSEMBLY']:['INITIAL PLACEMENT','REFINEMENT','FINAL ASSIGNMENT'])[i]);
   refreshFailures();
   $('reference').hidden=true;for(const id of ['metric-direct','metric-neighbors','metric-top1','metric-perfect'])$(id).textContent='—';
   $('metric-piece-count').textContent='Correct pieces / total pieces';
@@ -84,7 +84,7 @@ async function load(){
     $('metric-piece-count').textContent=`${correctPieces} / ${puzzle.piece_count} correct`;
     $('metric-perfect').textContent=puzzle.metrics.perfect?'Complete':'Incomplete';
     if(free){$('free-placed').textContent=`${puzzle.metrics.placed} / ${puzzle.piece_count}`;$('free-recall').textContent=pct(puzzle.metrics.neighbor_recall);$('free-bounds').textContent=`${puzzle.cols} × ${puzzle.rows}`;}
-    $('result-context').textContent=`Final-puzzle metrics · ${s.strategy==='shrink'?`shrinking frame · translation aligned · growth alone ${pct(puzzle.metrics.growth_direct)} → frame ${pct(puzzle.metrics.before_polish_direct)} → polish ${pct(puzzle.metrics.direct)} · ${puzzle.metrics.evicted} moves, ${puzzle.metrics.swaps} swaps`:free?'strongest pair · translation aligned':s.anchor?'top-left anchored':'unanchored'} · ${s.source?'custom image (not held-out validation)':`image ${s.index+1} of 100`}${!s.source&&s.category.startsWith('flat_')&&s.index>=30?' · beyond the original 30-puzzle flat-cut comparison':''}`;
+    $('result-context').textContent=`Final-puzzle metrics · ${s.strategy==='bounded'?`bounded growth · translation aligned · growth ${pct(puzzle.metrics.growth_direct)} → polish ${pct(puzzle.metrics.direct)} · ${puzzle.metrics.swaps} swaps`:s.strategy==='shrink'?`shrinking frame · translation aligned · growth alone ${pct(puzzle.metrics.growth_direct)} → frame ${pct(puzzle.metrics.before_polish_direct)} → polish ${pct(puzzle.metrics.direct)} · ${puzzle.metrics.evicted} moves, ${puzzle.metrics.swaps} swaps`:free?'strongest pair · translation aligned':s.anchor?'top-left anchored':'unanchored'} · ${s.source?'custom image (not held-out validation)':`image ${s.index+1} of 100`}${!s.source&&s.category.startsWith('flat_')&&s.index>=30?' · beyond the original 30-puzzle flat-cut comparison':''}`;
     $('loading').hidden=true;document.querySelector('.viewer').setAttribute('aria-busy','false');controls(true);draw();
     refreshUpdater();
     refreshFailures();

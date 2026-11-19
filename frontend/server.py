@@ -22,7 +22,8 @@ from interlock.data_collection.pairs import cell_size, side_types
 from interlock.models.edge_comparator import load_comparator, neighbor_ranks, score_matrix
 from interlock.solver.updaters import assemble, placement_metrics, puzzle_shape, shuffle_puzzle, solve, top_left_anchor, true_grid
 from interlock.solver.strongest_pair import strongest_pair, aligned_metrics
-from interlock.solver.shrink_frame import shrink_frame
+from interlock.solver.shrink_frame import grid_coordinates, prepare_scores, shrink_frame, swap_polish
+from interlock.solver.bounded_growth import bounded_growth
 from updater_metrics import summarize_updater
 
 WEB = ROOT / 'frontend'
@@ -37,7 +38,7 @@ CATEGORIES = [('clean', 'Clean pieces'), ('shrink_1px_half', 'Shrunk outlines'),
               ('uneven_outline', 'Uneven outlines'), ('smoothed_outline', 'Smoothed outlines'),
               ('pixel_noise', 'Pixel noise'), ('flat_even', 'Straight edges'),
               ('flat_diagonal', 'Slanted edges'), ('color_removed', 'Color removed')]
-FREE_STRATEGIES = ('strongest', 'shrink')  # solvers that place pieces on an open lattice, scored with alignment
+FREE_STRATEGIES = ('strongest', 'shrink', 'bounded')  # solvers that place pieces on an open lattice, scored with alignment
 jobs = {}
 pool = ThreadPoolExecutor(max_workers=1)
 models = {}
@@ -58,10 +59,12 @@ def identity(model):
 
 
 def replay_suffix(strategy, anchored):
-    """Last part of a replay's cache key. Shrinking-frame replays also carry a hash of shrink_frame.py, so editing
-    that solver only redoes its replays; the CNN scores (keyed by identity) stay cached."""
-    if strategy == 'shrink':
-        return 'shrink' + hashlib.sha256((ROOT / 'interlock/solver/shrink_frame.py').read_bytes()).hexdigest()[:8]
+    """Last part of a replay's cache key. Shrinking-frame and bounded-growth replays also carry a hash of their
+    solver files, so editing a solver only redoes its replays; the CNN scores (keyed by identity) stay cached."""
+    if strategy in ('shrink', 'bounded'):
+        files = ['shrink_frame.py'] + (['bounded_growth.py'] if strategy == 'bounded' else [])
+        code = b''.join((ROOT / 'interlock/solver' / name).read_bytes() for name in files)
+        return strategy + hashlib.sha256(code).hexdigest()[:8]
     return strategy if strategy in FREE_STRATEGIES else str(int(anchored))
 
 
@@ -190,6 +193,31 @@ def build(key, model_id, category, index, anchored, custom=None, strategy='grid'
                 'growth_direct': aligned_metrics(growth.coordinates, positions)['direct'],
                 'evicted': shrunk.num_evicted, 'swaps': shrunk.num_swaps}
             ground_truth = [-1]*grid.size
+        elif strategy == 'bounded':
+            # Board size comes from the piece count (square boards); true positions are never passed in.
+            growth = bounded_growth(logits)
+            origin = growth.coordinates.min(axis=0)
+            normalized = growth.coordinates - origin
+            cols, rows = (normalized.max(axis=0) + 1).tolist()
+            grid = np.full((rows,cols),-1,dtype=int)
+            frames = [{'label':'Ready','grid':grid.ravel().tolist(),'locked':[False]*grid.size}]
+            for step, piece in enumerate(growth.order):
+                x,y = normalized[piece]
+                grid[y,x] = piece
+                if step == 0:
+                    continue
+                frames.append({'label':'Strongest pair' if step == 1 else 'Bounded growth',
+                               'grid':grid.ravel().tolist(),'locked':(grid>=0).ravel().tolist()})
+            passes = swap_polish(prepare_scores(logits), grid)
+            for polished, _ in passes:
+                frames.append({'label':'Swap polish','grid':polished.ravel().tolist(),'locked':[True]*polished.size})
+            final_grid = passes[-1][0] if passes else grid
+            frames[-1]['label'] = 'Board complete'
+            final_coordinates = grid_coordinates(final_grid)
+            metrics = aligned_metrics(final_coordinates, positions) | {
+                'growth_direct': aligned_metrics(normalized, positions)['direct'],
+                'swaps': sum(len(swapped) // 2 for _, swapped in passes)}
+            ground_truth = [-1]*grid.size
         else:
             _, _, final = solve(logits, np.zeros((len(pieces), 4), dtype=np.int8) if flat else side_types(masks),
                                 trace=trace, rows=rows, cols=cols, straight_edges=flat,
@@ -218,7 +246,7 @@ def build(key, model_id, category, index, anchored, custom=None, strategy='grid'
                    'metrics':metrics | {'top1':float((ranks==1).mean())}, 'frames':frames}
         if strategy in FREE_STRATEGIES:
             payload['seed'] = growth.seed | {'slots':[(int(normalized[p][1])*cols+int(normalized[p][0])) for p in growth.seed['pieces']]}
-            payload['coordinates'] = (final_coordinates if strategy == 'shrink' else growth.coordinates).tolist()
+            payload['coordinates'] = (growth.coordinates if strategy == 'strongest' else final_coordinates).tolist()
             payload['true_positions'] = positions.tolist()  # evaluation / audit only, not solver input
         (folder / 'result.json').write_text(json.dumps(payload))
         job.update(status='ready', url=f'/cache/{key}/result.json')

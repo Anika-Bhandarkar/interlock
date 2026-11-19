@@ -22,6 +22,8 @@ from interlock.data_collection.pairs import cell_size, side_types
 from interlock.models.edge_comparator import load_comparator, neighbor_ranks, score_matrix
 from interlock.solver.updaters import assemble, placement_metrics, puzzle_shape, shuffle_puzzle, solve, top_left_anchor, true_grid
 from interlock.solver.strongest_pair import strongest_pair, aligned_metrics
+from interlock.solver.shrink_frame import grid_coordinates, prepare_scores, shrink_frame, swap_polish
+from interlock.solver.bounded_growth import bounded_growth
 from updater_metrics import summarize_updater
 
 WEB = ROOT / 'frontend'
@@ -36,6 +38,7 @@ CATEGORIES = [('clean', 'Clean pieces'), ('shrink_1px_half', 'Shrunk outlines'),
               ('uneven_outline', 'Uneven outlines'), ('smoothed_outline', 'Smoothed outlines'),
               ('pixel_noise', 'Pixel noise'), ('flat_even', 'Straight edges'),
               ('flat_diagonal', 'Slanted edges'), ('color_removed', 'Color removed')]
+FREE_STRATEGIES = ('strongest', 'shrink', 'bounded')  # solvers that place pieces on an open lattice, scored with alignment
 jobs = {}
 pool = ThreadPoolExecutor(max_workers=1)
 models = {}
@@ -54,6 +57,17 @@ def identity(model):
     return hashlib.sha256((hashes[model] + hashlib.sha256(inspect.getsource(build).encode()).hexdigest() + ''.join(hashlib.sha256(p.read_bytes()).hexdigest() for p in sources)).encode()).hexdigest()[:16]
 
 
+
+def replay_suffix(strategy, anchored):
+    """Last part of a replay's cache key. Shrinking-frame and bounded-growth replays also carry a hash of their
+    solver files, so editing a solver only redoes its replays; the CNN scores (keyed by identity) stay cached."""
+    if strategy in ('shrink', 'bounded'):
+        files = ['shrink_frame.py'] + (['bounded_growth.py'] if strategy == 'bounded' else [])
+        code = b''.join((ROOT / 'interlock/solver' / name).read_bytes() for name in files)
+        return strategy + hashlib.sha256(code).hexdigest()[:8]
+    return strategy if strategy in FREE_STRATEGIES else str(int(anchored))
+
+
 def validation_results(model, category, anchored, strategy='grid'):
     """List only measured cases, scoped to checkpoint, cuts, and anchor mode."""
     fingerprint = identity(model)
@@ -68,7 +82,7 @@ def validation_results(model, category, anchored, strategy='grid'):
                 index = record['val_index'] - 100
                 if 0 <= index < 100:
                     measured[index] = record['anchored' if anchored else 'unanchored']
-    suffix = 'strongest' if strategy == 'strongest' else str(int(anchored))
+    suffix = replay_suffix(strategy, anchored)
     for path in CACHE.glob(f'{fingerprint}-{model}-{category}-*-{suffix}/result.json'):
         try:
             result = json.loads(path.read_text())
@@ -145,6 +159,65 @@ def build(key, model_id, category, index, anchored, custom=None, strategy='grid'
                                'grid':grid.ravel().tolist(),'locked':(grid>=0).ravel().tolist()})
             frames[-1]['label'] = 'Free assembly complete'
             ground_truth = [-1]*grid.size  # Ground truth is never passed to the growth solver.
+        elif strategy == 'shrink':
+            # Board size comes from the piece count (square boards); true positions are never passed in.
+            shrunk = shrink_frame(logits)
+            growth = shrunk.growth
+            # Draw on the first frame's box, which holds the growth and every later frame.
+            fx0, fy0, fx1, fy1 = shrunk.steps[0].frame
+            origin = np.array([fx0, fy0])
+            normalized = growth.coordinates - origin
+            cols, rows = fx1-fx0+1, fy1-fy0+1
+            grid = np.full((rows,cols),-1,dtype=int)
+            frames = [{'label':'Ready','grid':grid.ravel().tolist(),'locked':[False]*grid.size}]
+            for step, piece in enumerate(growth.order):
+                x,y = normalized[piece]
+                grid[y,x] = piece
+                if step == 0:
+                    continue
+                frames.append({'label':'Strongest pair' if step == 1 else 'Outward growth',
+                               'grid':grid.ravel().tolist(),'locked':(grid>=0).ravel().tolist()})
+            for frame_step in shrunk.steps:
+                grid = np.full((rows,cols),-1,dtype=int)
+                local = frame_step.coordinates - origin
+                grid[local[:,1], local[:,0]] = np.arange(len(local))
+                x0,y0,x1,y1 = frame_step.frame
+                frames.append({'label':frame_step.label,'grid':grid.ravel().tolist(),'locked':(grid>=0).ravel().tolist(),
+                               'frame':[int(x0-fx0),int(y0-fy0),int(x1-fx0),int(y1-fy0)],
+                               'moved':[int(p) for p in frame_step.moved]})
+            frames[-1]['label'] = 'Frame closed'
+            final_coordinates = shrunk.steps[-1].coordinates - origin
+            metrics = aligned_metrics(final_coordinates, positions) | {
+                'exact_direct': float((shrunk.coordinates == positions).all(axis=1).mean()),
+                'before_polish_direct': aligned_metrics(shrunk.before_polish, positions)['direct'],
+                'growth_direct': aligned_metrics(growth.coordinates, positions)['direct'],
+                'evicted': shrunk.num_evicted, 'swaps': shrunk.num_swaps}
+            ground_truth = [-1]*grid.size
+        elif strategy == 'bounded':
+            # Board size comes from the piece count (square boards); true positions are never passed in.
+            growth = bounded_growth(logits)
+            origin = growth.coordinates.min(axis=0)
+            normalized = growth.coordinates - origin
+            cols, rows = (normalized.max(axis=0) + 1).tolist()
+            grid = np.full((rows,cols),-1,dtype=int)
+            frames = [{'label':'Ready','grid':grid.ravel().tolist(),'locked':[False]*grid.size}]
+            for step, piece in enumerate(growth.order):
+                x,y = normalized[piece]
+                grid[y,x] = piece
+                if step == 0:
+                    continue
+                frames.append({'label':'Strongest pair' if step == 1 else 'Bounded growth',
+                               'grid':grid.ravel().tolist(),'locked':(grid>=0).ravel().tolist()})
+            passes = swap_polish(prepare_scores(logits), grid)
+            for polished, _ in passes:
+                frames.append({'label':'Swap polish','grid':polished.ravel().tolist(),'locked':[True]*polished.size})
+            final_grid = passes[-1][0] if passes else grid
+            frames[-1]['label'] = 'Board complete'
+            final_coordinates = grid_coordinates(final_grid)
+            metrics = aligned_metrics(final_coordinates, positions) | {
+                'growth_direct': aligned_metrics(normalized, positions)['direct'],
+                'swaps': sum(len(swapped) // 2 for _, swapped in passes)}
+            ground_truth = [-1]*grid.size
         else:
             _, _, final = solve(logits, np.zeros((len(pieces), 4), dtype=np.int8) if flat else side_types(masks),
                                 trace=trace, rows=rows, cols=cols, straight_edges=flat,
@@ -171,9 +244,9 @@ def build(key, model_id, category, index, anchored, custom=None, strategy='grid'
                    'box': box, 'atlas_cols': atlas_cols, 'piece_count': len(pieces),
                    'truth':ground_truth,
                    'metrics':metrics | {'top1':float((ranks==1).mean())}, 'frames':frames}
-        if strategy == 'strongest':
+        if strategy in FREE_STRATEGIES:
             payload['seed'] = growth.seed | {'slots':[(int(normalized[p][1])*cols+int(normalized[p][0])) for p in growth.seed['pieces']]}
-            payload['coordinates'] = growth.coordinates.tolist()
+            payload['coordinates'] = (growth.coordinates if strategy == 'strongest' else final_coordinates).tolist()
             payload['true_positions'] = positions.tolist()  # evaluation / audit only, not solver input
         (folder / 'result.json').write_text(json.dumps(payload))
         job.update(status='ready', url=f'/cache/{key}/result.json')
@@ -239,8 +312,8 @@ class Handler(SimpleHTTPRequestHandler):
                     raise ValueError('Invalid model or category')
                 if anchored and not category.startswith('flat_'):
                     raise ValueError('Anchoring is available for straight and slanted cuts')
-                if strategy not in ('grid','strongest') or strategy == 'strongest' and (anchored or not category.startswith('flat_')):
-                    raise ValueError('Strongest pair is a separate mode for flat cuts; disable the top-left anchor')
+                if strategy not in ('grid',) + FREE_STRATEGIES or strategy in FREE_STRATEGIES and (anchored or not category.startswith('flat_')):
+                    raise ValueError('Strongest pair and shrinking frame are separate modes for flat cuts; disable the top-left anchor')
                 return self.json(validation_results(model, category, anchored, strategy))
             except (KeyError, ValueError) as exc:
                 return self.json({'message':str(exc)},400)
@@ -292,10 +365,10 @@ class Handler(SimpleHTTPRequestHandler):
                     raise ValueError('Invalid model, category, or image number')
                 if anchor and not category.startswith('flat_'):
                     raise ValueError('Anchoring is available for straight and slanted cuts')
-                if strategy not in ('grid','strongest') or strategy == 'strongest' and (anchor or not category.startswith('flat_')):
-                    raise ValueError('Strongest pair is a separate mode for flat cuts; disable the top-left anchor')
+                if strategy not in ('grid',) + FREE_STRATEGIES or strategy in FREE_STRATEGIES and (anchor or not category.startswith('flat_')):
+                    raise ValueError('Strongest pair and shrinking frame are separate modes for flat cuts; disable the top-left anchor')
                 source_key = f'{custom["source"]}-{custom["grid"]}' if custom else str(index)
-                suffix = 'strongest' if strategy == 'strongest' else str(int(anchor))
+                suffix = replay_suffix(strategy, anchor)
                 key = f'{identity(model)}-{model}-{category}-{source_key}-{suffix}'
                 if (CACHE/key/'result.json').exists():
                     return self.json({'status':'ready', 'url':f'/cache/{key}/result.json'})

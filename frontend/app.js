@@ -18,12 +18,13 @@ let wrongSlots=[];
 let updaterData=null,updaterRequest=0;
 const delay = ms => new Promise(resolve => setTimeout(resolve,ms));
 const selection = () => ({model:$('model').value,category,index:mode==='custom'?0:Number($('image-number').value)-1,anchor:anchored&&category.startsWith('flat_')?1:0,strategy:category.startsWith('flat_')?strategy:'grid',...(mode==='custom'?{source:customSource,grid:$('grid-size').value}:{})});
+const isFree = s => s==='strongest'||s==='shrink'||s==='bounded';
 const pct = x => `${(x*100).toFixed(1)}%`;
 function stop(){clearTimeout(timer);timer=null;$('play').textContent='▶';$('play').setAttribute('aria-label','Play assembly');}
 function anchorUI(){
   const flat=category.startsWith('flat_');
   $('anchor-control').hidden=!flat;
-  $('anchor-note').textContent=flat?(strategy==='strongest'?'Strongest pair seeds an open board. Growth uses matching scores only; no corner or rectangular boundary is supplied.':anchored?'Anchored evaluation supplies the true top-left piece. All other placements are inferred.':'Unanchored evaluation. The solver chooses its own starting piece.'):mode==='custom'?'Regular jigsaw cuts with known board dimensions and upright pieces.':'Same held-out images. Outlines and colors change according to the selected category.';
+  $('anchor-note').textContent=flat?(strategy==='bounded'?'Grows from the strongest pair, but never wider or taller than the board, filling the most clear-cut slot first (best minus second-best fit, plus half the best fit). A swap polish follows. Uses the piece count for the board size, never the layout.':strategy==='shrink'?'Strongest-pair growth, then a frame around it shrinks one side at a time to the board size; evicted pieces move to their best empty cell inside. A swap polish follows. Uses the piece count for the board size, never the layout.':strategy==='strongest'?'Strongest pair seeds an open board. Growth uses matching scores only; no corner or rectangular boundary is supplied.':anchored?'Anchored evaluation supplies the true top-left piece. All other placements are inferred.':'Unanchored evaluation. The solver chooses its own starting piece.'):mode==='custom'?'Regular jigsaw cuts with known board dimensions and upright pieces.':'Same held-out images. Outlines and colors change according to the selected category.';
 }
 function setCategory(id){
   category=id;
@@ -43,13 +44,13 @@ async function load(){
   const ticket=++request;stop();controls(false);data=null;
   updaterData=null;++updaterRequest;$('updater-analysis').hidden=true;
   wrongSlots=[];$('incorrect-legend').hidden=true;
-  const free=s.strategy==='strongest';
+  const free=isFree(s.strategy);
   $('free-metrics').hidden=!free;
   $('proposed-legend').hidden=free;
   for(const id of ['free-placed','free-recall','free-bounds'])$(id).textContent='—';
   $('location-label').textContent=free?'ALIGNED ACCURACY':'PLACEMENT ACCURACY';
   $('neighbor-label').textContent=free?'NEIGHBOR PRECISION':'NEIGHBORS';
-  document.querySelectorAll('.timeline-labels span').forEach((el,i)=>el.textContent=(free?['STRONGEST PAIR','OUTWARD GROWTH','FREE ASSEMBLY']:['INITIAL PLACEMENT','REFINEMENT','FINAL ASSIGNMENT'])[i]);
+  document.querySelectorAll('.timeline-labels span').forEach((el,i)=>el.textContent=(s.strategy==='bounded'?['STRONGEST PAIR','BOUNDED GROWTH','SWAP POLISH']:s.strategy==='shrink'?['STRONGEST PAIR','SHRINKING FRAME','SWAP POLISH']:free?['STRONGEST PAIR','OUTWARD GROWTH','FREE ASSEMBLY']:['INITIAL PLACEMENT','REFINEMENT','FINAL ASSIGNMENT'])[i]);
   refreshFailures();
   $('reference').hidden=true;for(const id of ['metric-direct','metric-neighbors','metric-top1','metric-perfect'])$(id).textContent='—';
   $('metric-piece-count').textContent='Correct pieces / total pieces';
@@ -83,7 +84,7 @@ async function load(){
     $('metric-piece-count').textContent=`${correctPieces} / ${puzzle.piece_count} correct`;
     $('metric-perfect').textContent=puzzle.metrics.perfect?'Complete':'Incomplete';
     if(free){$('free-placed').textContent=`${puzzle.metrics.placed} / ${puzzle.piece_count}`;$('free-recall').textContent=pct(puzzle.metrics.neighbor_recall);$('free-bounds').textContent=`${puzzle.cols} × ${puzzle.rows}`;}
-    $('result-context').textContent=`Final-puzzle metrics · ${free?'strongest pair · translation aligned':s.anchor?'top-left anchored':'unanchored'} · ${s.source?'custom image (not held-out validation)':`image ${s.index+1} of 100`}${!s.source&&s.category.startsWith('flat_')&&s.index>=30?' · beyond the original 30-puzzle flat-cut comparison':''}`;
+    $('result-context').textContent=`Final-puzzle metrics · ${s.strategy==='bounded'?`bounded growth · translation aligned · growth ${pct(puzzle.metrics.growth_direct)} → polish ${pct(puzzle.metrics.direct)} · ${puzzle.metrics.swaps} swaps`:s.strategy==='shrink'?`shrinking frame · translation aligned · growth alone ${pct(puzzle.metrics.growth_direct)} → frame ${pct(puzzle.metrics.before_polish_direct)} → polish ${pct(puzzle.metrics.direct)} · ${puzzle.metrics.evicted} moves, ${puzzle.metrics.swaps} swaps`:free?'strongest pair · translation aligned':s.anchor?'top-left anchored':'unanchored'} · ${s.source?'custom image (not held-out validation)':`image ${s.index+1} of 100`}${!s.source&&s.category.startsWith('flat_')&&s.index>=30?' · beyond the original 30-puzzle flat-cut comparison':''}`;
     $('loading').hidden=true;document.querySelector('.viewer').setAttribute('aria-busy','false');controls(true);draw();
     refreshUpdater();
     refreshFailures();
@@ -107,7 +108,8 @@ function draw(){
   for(const locked of [false,true])current.grid.forEach((id,i)=>{if(id<0||current.locked[i]!==locked)return;const x=ox+((i%cols)*cell-pad)*scale,y=oy+(Math.floor(i/cols)*cell-pad)*scale;sprite(ctx,id,x,y,box*scale,locked?1:.46);});
   ctx.restore();
   if(data.anchored&&frame>0){ctx.strokeStyle='#b57b60';ctx.lineWidth=3;ctx.strokeRect(ox+1.5,oy+1.5,cell*scale-3,cell*scale-3);}
-  if(data.strategy==='strongest'&&frame>0){ctx.strokeStyle='#b57b60';ctx.lineWidth=3;for(const i of data.seed.slots)ctx.strokeRect(ox+(i%cols)*cell*scale+1.5,oy+Math.floor(i/cols)*cell*scale+1.5,cell*scale-3,cell*scale-3);}
+  if(current.frame){const [fx0,fy0,fx1,fy1]=current.frame;ctx.save();ctx.setLineDash([10,6]);ctx.strokeStyle='#3d6f8e';ctx.lineWidth=3;ctx.strokeRect(ox+fx0*cell*scale,oy+fy0*cell*scale,(fx1-fx0+1)*cell*scale,(fy1-fy0+1)*cell*scale);ctx.restore();}
+  if(isFree(data.strategy)&&frame>0&&!current.frame){ctx.strokeStyle='#b57b60';ctx.lineWidth=3;for(const i of data.seed.slots)ctx.strokeRect(ox+(i%cols)*cell*scale+1.5,oy+Math.floor(i/cols)*cell*scale+1.5,cell*scale-3,cell*scale-3);}
   const finalFrame=frame===data.frames.length-1;
   const wrongCount=wrongSlots.filter(Boolean).length;
   $('incorrect-legend').hidden=!finalFrame;
@@ -123,7 +125,7 @@ function draw(){
   $('remaining').textContent=`${count-set.size} remaining`;
   $('stage').textContent=frame===0?'Ready to assemble':current.label==='stage 4'?'Final assignment':current.label.replace('stage 2','Initial placement').replace('stage 3','Refinement');
   $('scrubber').value=frame;$('step-count').textContent=`${frame} / ${data.frames.length-1}`;
-  const free=data.strategy==='strongest';
+  const free=isFree(data.strategy);
   $('live-updater').hidden=free;
   if(!free){
     const live=snapshotMetrics(data,current);
@@ -143,7 +145,7 @@ function draw(){
 
 async function refreshUpdater(){
   const ticket=++updaterRequest;
-  if(!data||mode!=='validation'||data.strategy==='strongest'){$('updater-analysis').hidden=true;return;}
+  if(!data||mode!=='validation'||isFree(data.strategy)){$('updater-analysis').hidden=true;return;}
   $('updater-analysis').hidden=false;
   const s=selection();
   try{
@@ -171,7 +173,7 @@ function renderUpdaterChart(){
   add('line',{id:'updater-cursor',x1:45,x2:45,y1:15,y2:145,stroke:'#343b32','stroke-dasharray':'3 3'});
 }
 function drawUpdaterCursor(){
-  if(!data||!updaterData?.rows.length||data.strategy==='strongest')return;
+  if(!data||!updaterData?.rows.length||isFree(data.strategy))return;
   const label=data.frames[frame].label;
   const key=label==='stage 4'?'final':label.startsWith('stage 3')?`round-${label.match(/round (\d+)/)?.[1]||1}`:'initial';
   const i=Math.max(0,updaterData.rows.findIndex(r=>r.key===key)),row=updaterData.rows[i];
@@ -261,7 +263,7 @@ async function refreshFailures(){
 }
 $('failure-toggle').onclick=()=>{failureOpen=!failureOpen;$('failure-panel').hidden=!failureOpen;$('failure-toggle').setAttribute('aria-expanded',String(failureOpen));if(failureOpen)refreshFailures();};
 $('next-failure').onclick=()=>{if(!failures.length)return;const current=Number($('image-number').value)-1;const next=failures.find(f=>f.index>current)||failures[0];$('image-number').value=next.number;load();};
-$('assembly-mode').onchange=()=>{const value=$('assembly-mode').value;anchored=value==='anchored';strategy=value==='strongest'?'strongest':'grid';anchorUI();load();};
+$('assembly-mode').onchange=()=>{const value=$('assembly-mode').value;anchored=value==='anchored';strategy=isFree(value)?value:'grid';anchorUI();load();};
 $('about-toggle').onclick=()=>{const open=$('about').hidden;$('about').hidden=!open;$('about-toggle').setAttribute('aria-expanded',String(open));};
 document.addEventListener('click',event=>{
   const trigger=event.target.closest('.help-trigger');
@@ -284,7 +286,7 @@ async function refreshBatch(){
       $('batch-status').title=current?`Current: image ${current.index+1}, ${current.model}, ${current.category}`:'';
       $('batch-status').style.setProperty('--cache-progress',`${100*state.completed/state.total}%`);
       if(meta&&mode==='validation')refreshFailures();
-      if(data&&mode==='validation'&&data.strategy!=='strongest')refreshUpdater();
+      if(data&&mode==='validation'&&!isFree(data.strategy))refreshUpdater();
     }else if(state.status==='complete')$('batch-status').textContent=`Validation complete · ${state.completed.toLocaleString()} replays`;
     else if(state.status!=='idle')$('batch-status').textContent=`Validation cache ${state.status} · ${state.completed??0} / ${state.total??'—'} ready. ${state.message||'Run precompute.py to resume.'}`;
     if(state.status==='complete'&&localStorage.getItem('interlock-notified-batch')!==state.started){
@@ -292,7 +294,7 @@ async function refreshBatch(){
       document.title='✓ Validation complete — interlock';
       $('announcement').textContent=`Validation completed. ${state.completed} of ${state.total} replays cached.`;
       if('Notification' in window&&Notification.permission==='granted')new Notification('Interlock validation complete',{body:`${state.completed} / ${state.total} replays are cached. Open the viewer to compare results.`});
-      if(data&&mode==='validation'&&data.strategy!=='strongest')refreshUpdater();
+      if(data&&mode==='validation'&&!isFree(data.strategy))refreshUpdater();
     }
   }catch(error){$('batch-status').hidden=true;}
 }

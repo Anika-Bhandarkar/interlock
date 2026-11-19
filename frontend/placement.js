@@ -3,7 +3,7 @@ function placementErrors(puzzle) {
   const final = puzzle.frames[puzzle.frames.length - 1];
   return final.grid.map((id, slot) => {
     if (id < 0) return false;
-    if (puzzle.strategy !== 'strongest') return id !== puzzle.truth[slot];
+    if (puzzle.strategy !== 'strongest' && puzzle.strategy !== 'shrink') return id !== puzzle.truth[slot];
     const point = puzzle.coordinates[id], truth = puzzle.true_positions[id];
     const shift = puzzle.metrics.alignment_shift;
     return point[0] + shift[0] !== truth[0] || point[1] + shift[1] !== truth[1];
